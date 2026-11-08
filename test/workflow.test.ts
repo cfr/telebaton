@@ -56,7 +56,7 @@ function setup(feedbackReplies: string[]) {
     writeFileSync(join(project, '.gitignore'), 'wlog/\ngate-count\n');
     writeFileSync(join(project, 'code.txt'), 'before');
     writeFileSync(join(project, 'PLAN.md'), '# Plan\n');
-    writeFileSync(join(project, 'CONDUCTOR.toml'), `
+    writeFileSync(join(project, 'telebaton.toml'), `
 [gate]
 all = "echo passed >> gate-count"
 [roles]
@@ -596,7 +596,7 @@ test('skip cannot bypass implementation or pending feedback repair dispositions'
 test('skip consumes exactly one round when the next round uses the same checker', async () => {
     const f = setup([feedback([]), feedback([])]);
     try {
-        const config = join(f.project, 'CONDUCTOR.toml');
+        const config = join(f.project, 'telebaton.toml');
         writeFileSync(config, readFileSync(config, 'utf8').replace('["ds", "glm", "mm"]', '["ds", "ds", "mm"]'));
         const ds = await f.adapter.create({ name: 'ds', model: 'test-ds', tag: 'ds', harness: 'codex' },
             { title: '0170-task feedback', cwd: f.project, asker: { permission: async () => 'reject', question: async () => '' } });
@@ -643,7 +643,7 @@ test('roles edit supports keep, discard and config-only commits without disturbi
         const f = setup([]);
         try {
             f.store.state.task = undefined;
-            const file = join(f.project, 'CONDUCTOR.toml');
+            const file = join(f.project, 'telebaton.toml');
             const original = readFileSync(file, 'utf8');
             writeFileSync(join(f.project, 'code.txt'), 'staged unrelated work');
             f.git('add', 'code.txt');
@@ -652,7 +652,7 @@ test('roles edit supports keep, discard and config-only commits without disturbi
             const content = readFileSync(file, 'utf8');
             assert.equal(content === original, choice === 'discard');
             if (choice === 'commit') {
-                assert.equal(f.git('show', '--format=', '--name-only', 'HEAD'), 'CONDUCTOR.toml');
+                assert.equal(f.git('show', '--format=', '--name-only', 'HEAD'), 'telebaton.toml');
                 assert.match(f.git('log', '-1', '--format=%B'), /Co-Authored-By: Codex/);
                 assert.equal(f.git('diff', '--cached', '--name-only'), 'code.txt');
             } else assert.equal(f.git('log', '-1', '--format=%s'), 'Initial');
@@ -669,7 +669,7 @@ test('roles edits refuse unfinished tasks, hidden pending work and dirty configu
         f.h.live.get('implement')!.pendingWork = async () => [{ kind: 'shell', id: 'job', description: 'unfinished smoke' }];
         await assert.rejects(f.h.rolesCommand('implement sol'), /pending work/);
         f.h.live.get('implement')!.pendingWork = async () => [];
-        const file = join(f.project, 'CONDUCTOR.toml');
+        const file = join(f.project, 'telebaton.toml');
         writeFileSync(file, readFileSync(file, 'utf8') + '\n# user edit\n');
         await assert.rejects(f.h.rolesCommand('implement sol'), /already has uncommitted/);
         assert.equal(f.h.busy, null);
@@ -704,7 +704,7 @@ test('agent handoff preserves dirty work, task base and repair metadata and wait
         assert.match(f.h.roleList(), /implement: kimi -> sol/);
         assert.ok(existsSync(old.logFile!));
         assert.equal(f.store.state.archivedSessions!.length, 1);
-        assert.match(readFileSync(join(f.project, 'CONDUCTOR.toml'), 'utf8'), /implement = "kimi"/);
+        assert.match(readFileSync(join(f.project, 'telebaton.toml'), 'utf8'), /implement = "kimi"/);
         await f.h.agentCommand('kimi');
         assert.equal(f.store.state.sessions.implement!.agent, 'kimi');
         assert.equal(f.store.state.sessions.implement!.logSequence, 2);
@@ -817,7 +817,7 @@ test('feedback agent swap affects the current slot only and final review marks t
 test('roles confirmation cannot overwrite concurrent edits and never stages unrelated files', async () => {
     const f = setup([]);
     f.store.state.task = undefined;
-    const path = join(f.project, 'CONDUCTOR.toml');
+    const path = join(f.project, 'telebaton.toml');
     try {
         f.chat.ask = async () => {
             writeFileSync(path, readFileSync(path, 'utf8') + '\n# concurrent user edit\n');
@@ -861,7 +861,7 @@ test('kept role changes accumulate across restart and commit together', async ()
     f.store.state.task = undefined;
     f.store.save();
     let restored: Harness | undefined;
-    const config = join(f.project, 'CONDUCTOR.toml');
+    const config = join(f.project, 'telebaton.toml');
     const diffs: string[] = [];
     f.chat.sendFile = async (_name, content) => { diffs.push(content); };
     try {
@@ -876,11 +876,11 @@ test('kept role changes accumulate across restart and commit together', async ()
         restored.live.set('implement', f.h.live.get('implement')!);
         f.chat.ask = async () => 'commit';
         await restored.rolesCommand('feedback mm ds');
-        const committed = f.git('show', 'HEAD:CONDUCTOR.toml');
+        const committed = f.git('show', 'HEAD:telebaton.toml');
         assert.match(committed, /implement = "sol"/);
         assert.match(committed, /feedback = \["mm","ds"\]/);
-        assert.equal(f.git('diff', '--', 'CONDUCTOR.toml'), '');
-        assert.equal(f.git('show', '--format=', '--name-only', 'HEAD'), 'CONDUCTOR.toml');
+        assert.equal(f.git('diff', '--', 'telebaton.toml'), '');
+        assert.equal(f.git('show', '--format=', '--name-only', 'HEAD'), 'telebaton.toml');
         assert.match(diffs[1], /\+implement = "sol"/);
         assert.match(diffs[1], /\+feedback = \["mm","ds"\]/);
     } finally { await f.h.shutdown(); await restored?.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
@@ -889,7 +889,7 @@ test('kept role changes accumulate across restart and commit together', async ()
 test('discarding a second role edit preserves the first kept edit and it can be committed unchanged', async () => {
     const f = setup([]);
     f.store.state.task = undefined;
-    const file = join(f.project, 'CONDUCTOR.toml');
+    const file = join(f.project, 'telebaton.toml');
     try {
         f.chat.ask = async () => 'keep';
         await f.h.rolesCommand('implement sol');
@@ -899,8 +899,8 @@ test('discarding a second role edit preserves the first kept edit and it can be 
         assert.equal(readFileSync(file, 'utf8'), kept);
         f.chat.ask = async () => 'commit';
         await f.h.rolesCommand('implement sol');
-        assert.equal(f.git('show', 'HEAD:CONDUCTOR.toml'), kept.trim());
-        assert.equal(f.git('diff', '--', 'CONDUCTOR.toml'), '');
+        assert.equal(f.git('show', 'HEAD:telebaton.toml'), kept.trim());
+        assert.equal(f.git('diff', '--', 'telebaton.toml'), '');
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
@@ -908,7 +908,7 @@ test('swap defaults applies both sides atomically with commit, keep or discard',
     for (const choice of ['commit', 'keep', 'discard']) {
         const f = setup([]);
         f.store.state.task = undefined;
-        const file = join(f.project, 'CONDUCTOR.toml');
+        const file = join(f.project, 'telebaton.toml');
         const original = readFileSync(file, 'utf8');
         let asks = 0;
         f.chat.ask = async () => { asks++; return choice; };
@@ -921,7 +921,7 @@ test('swap defaults applies both sides atomically with commit, keep or discard',
                 assert.match(content, /implement = "ds"/);
                 assert.match(content, /feedback = \["kimi","glm","mm"\]/);
             }
-            if (choice === 'commit') assert.equal(f.git('show', '--format=', '--name-only', 'HEAD'), 'CONDUCTOR.toml');
+            if (choice === 'commit') assert.equal(f.git('show', '--format=', '--name-only', 'HEAD'), 'telebaton.toml');
             else assert.equal(f.git('log', '-1', '--format=%s'), 'Initial');
             assert.equal(f.h.busy, null);
         } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
@@ -930,7 +930,7 @@ test('swap defaults applies both sides atomically with commit, keep or discard',
 
 test('swap refuses unfinished tasks and ambiguous assignments without modifying configuration', async () => {
     const f = setup([]);
-    const file = join(f.project, 'CONDUCTOR.toml');
+    const file = join(f.project, 'telebaton.toml');
     const original = readFileSync(file, 'utf8');
     try {
         await assert.rejects(f.h.swapCommand('kimi ds'), /task or session is still in progress/);
@@ -1020,6 +1020,20 @@ test('shutdown prevents commands awaiting a Telegram announcement from launching
             assert.equal(existsSync(marker), false);
         } finally { release(); await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
     }
+});
+
+test('role edits commit only the selected legacy config when telebaton.toml is absent', async () => {
+    const f = setup([]);
+    f.store.state.task = undefined;
+    try {
+        f.git('mv', 'telebaton.toml', 'CONDUCTOR.toml');
+        f.git('commit', '-qm', 'Use legacy config');
+        f.chat.ask = async () => 'commit';
+        await f.h.rolesCommand('implement sol');
+        assert.match(f.git('show', 'HEAD:CONDUCTOR.toml'), /implement = "sol"/);
+        assert.equal(f.git('show', '--format=', '--name-only', 'HEAD'), 'CONDUCTOR.toml');
+        assert.equal(existsSync(join(f.project, 'telebaton.toml')), false);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
 test('/usage routes independently of running task work and /agents keeps listing models', async () => {

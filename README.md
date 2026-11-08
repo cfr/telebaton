@@ -1,8 +1,8 @@
-# conductor
+# Telebaton
 
 A Telegram bridge for developing a local project with opencode, Codex CLI, and Claude Code.
 Agents implement `PLAN.md` tasks, check each other's work, review changes, and apply fixes.
-Conductor runs the project's verification gate, tracks findings and repair commits, and exports
+Telebaton runs the project's verification gate, tracks findings and repair commits, and exports
 session logs and token usage. Agents and role defaults belong to the project; models can be mixed
 across harnesses. See [DESIGN.md](DESIGN.md) for the architecture.
 
@@ -11,13 +11,15 @@ across harnesses. See [DESIGN.md](DESIGN.md) for the architecture.
 Use Node 24 or newer. Node runs the TypeScript source directly; there is no build step.
 
 ```sh
+git clone https://github.com/cfr/telebaton.git
+cd telebaton
 npm install
 cp config.example.toml config.toml
 ```
 
 Edit `config.toml` with the project path, Telegram bot token, and your numeric Telegram user ID.
 It is gitignored because it contains the token. Only the configured user can control the bot.
-One process may poll a bot token at a time; stop any other bot using it. Conductor exits on a
+One process may poll a bot token at a time; stop any other bot using it. Telebaton exits on a
 Telegram `409 Conflict`.
 
 Install and authenticate the harnesses you intend to use:
@@ -28,23 +30,28 @@ Install and authenticate the harnesses you intend to use:
 | `codex` | Uses `codex exec --json` and `exec resume`. Sign in with `codex login`. |
 | `claude` | Runs Claude Code through the Anthropic Agent SDK. |
 
-Conductor can start without a separate Claude Code installation and does not launch a Claude
+Telebaton can start without a separate Claude Code installation and does not launch a Claude
 process merely because the adapter exists. A Claude process starts only when a Claude session
 gets a turn. The Anthropic SDK npm dependency is still required because it is imported at startup.
 Saved sessions refer to configured agent names; keep those definitions while using the sessions.
 
-The target project needs `PLAN.md` with a `## Next` list and `CONDUCTOR.toml` at its root.
-[CONDUCTOR.example.toml](CONDUCTOR.example.toml) is a starting template. Adjust its models, gate,
+The target project needs `PLAN.md` with a `## Next` list and `telebaton.toml` at its root.
+[telebaton.example.toml](telebaton.example.toml) is a starting template. Adjust its models, gate,
 and commands for your project.
 
 ## Configuration
+
+Telebaton was previously named Conductor. Projects use lowercase `telebaton.toml`; legacy
+`CONDUCTOR.toml` remains supported as a fallback. When both exist, `telebaton.toml` takes precedence.
+The local-config environment variable `CONDUCTOR_CONFIG` and `conductor-feedback` /
+`conductor-dispositions` report formats keep their existing names for session compatibility.
 
 The two configuration files serve different purposes:
 
 | File | Contents |
 | --- | --- |
-| Conductor's `config.toml` | Project path, Telegram credentials, state path and opencode URL. |
-| Project's `CONDUCTOR.toml` | Gate, agents, roles, feedback rounds, commands and prompts. |
+| Telebaton's `config.toml` | Project path, Telegram credentials, state path and opencode URL. |
+| Project's `telebaton.toml` | Gate, agents, roles, feedback rounds, commands and prompts. |
 
 Each `[agents.<name>]` selects a `harness`, `model`, and unique `tag`. The name selects the agent
 in commands; the tag prefixes replies and names logs. For opencode, model IDs use `provider/model`
@@ -76,8 +83,8 @@ build = "cmake --build --preset debug"
 test = "ctest --preset debug --output-on-failure"
 ```
 
-Conductor reloads project configuration when commands such as `/next`, `/review`, and `/plan`
-start. Existing sessions retain their selected agent. Restart conductor after adding command
+Telebaton reloads project configuration when commands such as `/next`, `/review`, and `/plan`
+start. Existing sessions retain their selected agent. Restart Telebaton after adding command
 names or aliases because Telegram handlers are registered at startup. Machine settings and code
 changes also require a restart.
 
@@ -88,20 +95,20 @@ npm start
 ```
 
 Set `CONDUCTOR_CONFIG` to use a different local config file. Console messages carry local
-timestamps. Ctrl-C stops conductor and its managed project commands; a second Ctrl-C or a
+timestamps. Ctrl-C stops Telebaton and its managed project commands; a second Ctrl-C or a
 15-second shutdown timeout forces exit.
 
 The normal loop is:
 
 1. `/next [agent] [id]` shows the selected `PLAN.md` item and asks for confirmation. Without an
    ID it takes the first item under `## Next`. The agent implements and commits.
-2. Conductor runs the gate after a committing turn. A failure goes back to the agent once;
+2. Telebaton runs the gate after a committing turn. A failure goes back to the agent once;
    a second failure waits for you. A turn without a commit normally waits for your response.
 3. Feedback agents check in the configured order. Actionable findings go to the implementer,
-   which records dispositions and commits repairs. Conductor gates those commits before the next
+   which records dispositions and commits repairs. Telebaton gates those commits before the next
    check. Later checkers receive earlier findings, rejection reasons, repairs, and gate evidence.
 4. The review agent checks the combined result. `/fix [notes]` asks that reviewer to apply fixes
-   and commit; conductor runs the gate again. Review fixes require your instruction, normally `/fix`.
+   and commit; Telebaton runs the gate again. Review fixes require your instruction, normally `/fix`.
 
 `[flow] feedback_rounds` defaults to the number of feedback agents; `0` skips feedback. Repeated
 names allow rechecks in the same session. A clean verdict or an answer without commits skips
@@ -109,7 +116,7 @@ remaining consecutive rounds for that agent and moves to the next listed agent. 
 are configured than names, the last agent repeats. `/feedback [agent]` adds a check manually.
 
 Agents follow the project's instructions for commits and for moving completed tasks from
-`PLAN.md` to `CHANGELOG.md`. Conductor does not edit those files. Gate output, commit summaries,
+`PLAN.md` to `CHANGELOG.md`. Telebaton does not edit those files. Gate output, commit summaries,
 and diffs are posted to Telegram; long outputs are attached as files. Prompts are shown as
 collapsed quotes so you can inspect what the agent received.
 Implementation, review and planning prompts instruct agents to write commit messages to a file
@@ -121,7 +128,7 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 | Command | Purpose |
 | --- | --- |
 | `/next [agent] [id]` | Start the next or specified task, with confirmation. |
-| `/review [agent] [id]` | Review the current task or adopt work done outside conductor. |
+| `/review [agent] [id]` | Review the current task or adopt work done outside Telebaton. |
 | `/fix [notes]` | Apply review fixes in the reviewer session. |
 | `/feedback [agent]` | Run another feedback check. |
 | `/skip` | Skip the current feedback checker and continue to the next checker or final review. |
@@ -153,7 +160,7 @@ fallback; network failures are retried for about three minutes.
 ## Planning, chat, and summaries
 
 Planning may read the repository and edit only `PLAN.md`. `/plan done` asks the agent to commit
-that file; conductor shows the changes, warns about other touched files, and offers keep/undo.
+that file; Telebaton shows the changes, warns about other touched files, and offers keep/undo.
 `/plan stop` follows the same flow. `/stop plan` interrupts a running planner.
 Planning prompts explicitly limit PLAN.md-only validation to Markdown formatting/checking and diff
 inspection. Builds, test suites, and the full gate run only when explicitly requested, including
@@ -222,7 +229,7 @@ Names and aliases accept lowercase letters, digits, and underscores, starting wi
 `confirm = true` adds a confirmation button. One-shot commands wait for agent/gate work to be
 idle and report exit status and output. Background commands return their status when sent again;
 `ready` is an optional output regex used to report readiness, otherwise output is sampled after
-five seconds. Concurrent starts of the same background command are refused. Conductor tracks
+five seconds. Concurrent starts of the same background command are refused. Telebaton tracks
 both one-shot and background commands, stops their process groups on exit, and reaps leftovers
 at startup using PID records. Descendants that ignore the stop signal are killed after a grace
 period. Logs and PID records live under `commands/` beside the state file.
@@ -239,7 +246,7 @@ Use `/agents` to find the configured aliases. For example:
 ```
 
 Role edits require an idle workflow and no unfinished task, including a stopped task. They update
-only the selected assignment in the tracked `CONDUCTOR.toml`, show the diff, and offer **commit**,
+only the selected assignment in the tracked `telebaton.toml`, show the diff, and offer **commit**,
 **keep** (uncommitted), or **discard**. Kept role changes can be combined: change the implementer,
 choose keep, then change feedback and choose commit to commit both. Discard restores the state
 before the latest request, retaining earlier kept changes. Uncommitted edits outside role defaults
@@ -260,20 +267,20 @@ The old session and logs are archived, and repeated swaps keep separate transcri
 The new agent waits for `/continue` before spending tokens. Defaults remain unchanged. Swapping
 the first feedback checker leaves the rest of the configured sequence in place.
 
-An idle parent session can still have background work. For opencode, conductor checks shell jobs,
+An idle parent session can still have background work. For opencode, Telebaton checks shell jobs,
 subagents and their descendants, queued inbox work, and completion processing. It waits until
 notifications are delivered and the parent has processed them and become idle again. Foreground
 subagent results can acknowledge completion inline.
 
 The gate, a new task, and another feedback/review session cannot start while this work is pending.
-`/status` names the outstanding work. Conductor rechecks every two seconds without sending model
+`/status` names the outstanding work. Telebaton rechecks every two seconds without sending model
 prompts. Failed status lookups hold the workflow as unknown; they never imply that work finished.
 Turn failures are reported even while this barrier is held. Failed OpenCode children show their
 provider error and HTTP status in pending-work messages and `/status`, rather than appearing to
 still be running. Failure details survive restarts; polling does not repeat the same turn alert.
 `/continue <role>` can send instructions to the same waiting session.
 For failed OpenCode children whose completion notifications never arrived, the next parent
-prompt includes their recorded failures. Conductor records delivery of that prompt and releases
+prompt includes their recorded failures. Telebaton records delivery of that prompt and releases
 those failure waits only after the parent finishes successfully. It does not treat the children
 as successful, retry them automatically, or ignore their running jobs and queued work.
 
@@ -293,7 +300,7 @@ automation pauses. After pending work settles, `/gate` verifies the current tree
 feedback; an older green result does not clear the conflict.
 
 After a restart, opencode turns can still be running and are followed through completion. Claude
-turns are reported as interrupted because their SDK process stops with conductor. Graceful
+turns are reported as interrupted because their SDK process stops with Telebaton. Graceful
 shutdown stops managed Codex process groups, including chat and summary sessions. After a crash,
 persisted Codex process groups remain pending while alive; `/stop` ends them before `/continue`
 resumes the saved thread. Recovered processes are signalled only when their recorded identity
@@ -302,13 +309,13 @@ notifications to this adapter.
 
 ## Findings and verification
 
-Conductor appends validation guidance and report contracts even when project prompts are overridden.
+Telebaton appends validation guidance and report contracts even when project prompts are overridden.
 Agents should demonstrate a regression failing without the fix, test real caller paths across
 components, and exercise maximum supported bounds. If a demonstration is impractical, they must
 explain why. These instructions help reviewers assess evidence; a green gate alone does not prove
 test quality.
 
-Conductor owns the full gate after commits. Checkers receive its SHA, commands, result, time, and
+Telebaton owns the full gate after commits. Checkers receive its SHA, commands, result, time, and
 log path, plus whether it still matches the current tree. They should use that evidence and
 focused experiments instead of repeating a green full gate on unchanged code.
 
@@ -329,7 +336,7 @@ Feedback and review return a readable report plus one fenced `conductor-feedback
 ```
 
 The reply ends with matching `VERDICT: findings` or `VERDICT: clean`. Categories are `bug`,
-`test_gap`, `docs`, and `process`. Conductor assigns IDs such as `0169-F01`. `relatedTo` links a
+`test_gap`, `docs`, and `process`. Telebaton assigns IDs such as `0169-F01`. `relatedTo` links a
 coverage gap to its bug; `duplicateOf` identifies a repeated finding. Both can reference a local
 key or an existing ID. A clean report has no new, reopened, or unresolved actionable findings.
 
@@ -360,7 +367,7 @@ ID, so agents can fill in statuses and evidence without substituting placeholder
 
 ## Logs, usage, and state
 
-The local `state` setting defaults to `state/state.json` beside conductor's config. Keep that state
+The local `state` setting defaults to `state/state.json` beside Telebaton's config. Keep that state
 directory to resume sessions and preserve finding history. Related directories such as `findings/`,
 `codex/`, and `commands/` are stored beside the state file.
 
@@ -379,7 +386,7 @@ Project logs default to `wlog/`, configurable through `[logs] dir`:
 Planning/chat names without a current task use a date; names are tied to the task when the session
 opens. New planning/chat sessions get numeric suffixes if a filename is already taken.
 
-The canonical ledger is `findings/<task>.json` beside conductor's state file. It preserves source
+The canonical ledger is `findings/<task>.json` beside Telebaton's state file. It preserves source
 model/role/session/SHA, stable finding IDs, relationships, dispositions, repair commits, and
 verification history. Markdown summaries are regenerated from it, including by `/log`. Related test
 gaps and duplicates are counted separately from defect groups. Historical logs are not backfilled.
@@ -387,7 +394,7 @@ gaps and duplicates are counted separately from defect groups. Historical logs a
 Markdown token totals are rounded. `.usage.json` preserves exact reported counts and turn indices;
 `unmeteredTurns` marks missing usage data. Cached input is separate from uncached input, and output
 includes reasoning where reported by the harness. Codex reports cumulative thread counters on
-resume. Conductor subtracts the previous snapshot before recording each turn, preserving raw
+resume. Telebaton subtracts the previous snapshot before recording each turn, preserving raw
 counters and marking the accounting as `thread-delta`. Counter resets start a new accounting
 epoch. Its model-step count and maximum single-request context remain unavailable (`null` in
 JSON). Turns without a completion record remain unmetered; a later cumulative delta can include
@@ -418,7 +425,7 @@ npm run check  # TypeScript
 npm test       # Node test runner
 ```
 
-Conductor is a prototype. Current limits include:
+Telebaton is a prototype. Current limits include:
 
 - The verification gate cannot be interrupted through `/stop`.
 - Provider failures require `/continue`; they are not retried automatically. Report-format

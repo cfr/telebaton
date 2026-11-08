@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFileSync } from 'node:fs';
-import { fill, parseProjectConfig } from '../src/config.ts';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fill, loadProjectConfig, parseProjectConfig, projectConfigPath } from '../src/config.ts';
 
 const base = `
 [gate]
@@ -23,6 +25,20 @@ harness = "claude"
 model = "claude-opus-5-5"
 tag = "opus55"
 `;
+
+test('loads lowercase telebaton.toml preferentially and falls back to the legacy filename', () => {
+    const root = mkdtempSync(join(tmpdir(), 'telebaton-config-'));
+    try {
+        assert.equal(projectConfigPath(root), join(root, 'telebaton.toml'));
+        writeFileSync(join(root, 'CONDUCTOR.toml'), base);
+        assert.equal(projectConfigPath(root), join(root, 'CONDUCTOR.toml'));
+        assert.equal(loadProjectConfig(root).roles.implement, 'glm');
+        writeFileSync(join(root, 'telebaton.toml'), base.replace('implement = "glm"', 'implement = "opus"'));
+        assert.equal(loadProjectConfig(root).roles.implement, 'opus');
+        writeFileSync(join(root, 'telebaton.toml'), 'invalid TOML [');
+        assert.throws(() => loadProjectConfig(root));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('parses agents, roles, ordered gate and default prompts', () => {
     const c = parseProjectConfig('/repo', base);
@@ -89,7 +105,7 @@ aliases = ["server"]
 });
 
 test('the example spells out every prompt as its default', () => {
-    const example = readFileSync(new URL('../CONDUCTOR.example.toml', import.meta.url), 'utf8');
+    const example = readFileSync(new URL('../telebaton.example.toml', import.meta.url), 'utf8');
     const bare = example.replace(/^\[prompts\][\s\S]*?(?=^\[|(?![\s\S]))/m, '');
     assert.notEqual(bare, example);
     assert.equal(parseProjectConfig('/p', example).prompts.fixNotes, 'please fix {notes}; then commit');

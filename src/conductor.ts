@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { CodexAdapter } from './agents/codex.ts';
 import { ClaudeAdapter } from './agents/claude.ts';
 import { OpencodeAdapter } from './agents/opencode.ts';
@@ -7,6 +7,7 @@ import type { Adapter, AgentSession, Asker, Question, TurnResult, TurnState, Uns
 import {
     fill,
     loadProjectConfig,
+    projectConfigPath,
     parseProjectConfig,
     planValidationGuidance,
     type AgentConfig,
@@ -148,7 +149,7 @@ export class Conductor {
         this.reload();
         const c = this.project.commands.find((x) => x.name === name);
         if (!c) {
-            await this.chat.send(`/${name} is no longer in CONDUCTOR.toml`);
+            await this.chat.send(`/${name} is no longer in the project configuration`);
             return;
         }
         if (c.background) {
@@ -572,7 +573,7 @@ export class Conductor {
         const { agent } = this.parseArgs(args);
         const name = agent ?? this.nextFeedbackAgent() ?? this.project.roles.feedback.at(-1);
         if (!name) {
-            await this.chat.send('no feedback agent: set roles.feedback in CONDUCTOR.toml, or /feedback <agent>');
+            await this.chat.send('no feedback agent: set roles.feedback in the project configuration, or /feedback <agent>');
             return;
         }
         if (!this.state.task || !this.state.sessions.implement) {
@@ -1790,7 +1791,8 @@ export class Conductor {
             throw new Error('a task or session is still in progress; finish it before changing role defaults');
         }
         const root = this.project.root;
-        const file = join(root, 'CONDUCTOR.toml');
+        const file = projectConfigPath(root);
+        const configName = basename(file);
         const original = readFileSync(file, 'utf8');
         const edited = edit(original);
         const proposal = JSON.stringify(parseProjectConfig(root, edited).roles) === JSON.stringify(this.project.roles)
@@ -1802,28 +1804,28 @@ export class Conductor {
                 const [status, work] = await Promise.all([session.turnState(ref.turn?.since ?? 0), session.pendingWork()]);
                 if (status.running || work.length) throw new Error(`${name} still has pending work; finish it before changing defaults`);
             }
-            await git(root, 'ls-files', '--error-unmatch', '--', 'CONDUCTOR.toml');
+            await git(root, 'ls-files', '--error-unmatch', '--', configName);
             const head = await repo.head(root);
-            const committed = await git(root, 'show', `${head}:CONDUCTOR.toml`);
+            const committed = await git(root, 'show', `${head}:${configName}`);
             if (committed !== original && !onlyRoleChanges(committed, original)) {
-                throw new Error('CONDUCTOR.toml already has uncommitted changes outside role defaults; commit or discard those first');
+                throw new Error(`${configName} already has uncommitted changes outside role defaults; commit or discard those first`);
             }
-            if (proposal === original && !(await repo.fileDiff(root, 'CONDUCTOR.toml')).trim()) {
+            if (proposal === original && !(await repo.fileDiff(root, configName)).trim()) {
                 await this.chat.send('role defaults are unchanged');
                 return;
             }
-            if (readFileSync(file, 'utf8') !== original) throw new Error(`CONDUCTOR.toml changed; retry ${command}`);
+            if (readFileSync(file, 'utf8') !== original) throw new Error(`${configName} changed; retry ${command}`);
             writeFileSync(file, proposal);
             this.reload();
-            await this.chat.sendFile('CONDUCTOR.diff', await repo.fileDiff(root, 'CONDUCTOR.toml'), this.roleList());
+            await this.chat.sendFile(`${configName.slice(0, -5)}.diff`, await repo.fileDiff(root, configName), this.roleList());
             const choice = await this.chat.ask('Keep the role changes?', ['commit', 'keep', 'discard'], false);
-            if (readFileSync(file, 'utf8') !== proposal) throw new Error('CONDUCTOR.toml changed during confirmation; left it untouched');
+            if (readFileSync(file, 'utf8') !== proposal) throw new Error(`${configName} changed during confirmation; left it untouched`);
             if (choice === 'discard') writeFileSync(file, original);
             else if (choice === 'commit') {
                 if (await repo.head(root) !== head) throw new Error('HEAD moved during confirmation; role changes are kept uncommitted');
-                await git(root, 'add', '--', 'CONDUCTOR.toml');
+                await git(root, 'add', '--', configName);
                 await git(root, 'commit', '--only', '-m', 'Update role defaults',
-                    '-m', 'Co-Authored-By: Codex <noreply@openai.com>', '--', 'CONDUCTOR.toml');
+                    '-m', 'Co-Authored-By: Codex <noreply@openai.com>', '--', configName);
             }
             this.reload();
             await this.chat.send(choice === 'discard' ? 'role changes discarded' : choice === 'commit'

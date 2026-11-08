@@ -66,7 +66,7 @@ export function editRoleDefaults(root: string, text: string, role: string, names
     for (const name of names) if (!config.agents.has(name)) throw new Error(`unknown agent "${name}"; see /agents`);
     const lines = text.split('\n');
     const start = lines.findIndex((line) => /^\s*\[roles\]\s*(?:#.*)?$/.test(line));
-    if (start < 0) throw new Error('add a [roles] table to CONDUCTOR.toml before editing roles');
+    if (start < 0) throw new Error('add a [roles] table to the project configuration before editing roles');
     let end = start + 1;
     while (end < lines.length && !/^\s*\[/.test(lines[end])) end++;
     const key = new RegExp(`^\\s*(?:${role}|"${role}"|'${role}')\\s*=`);

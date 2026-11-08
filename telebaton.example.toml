@@ -1,10 +1,10 @@
 # Project configuration: which agents
 # implement, check, review and plan, the verification gate it runs after every committing turn,
 # the prompts it sends, and project commands (/deploy, /serve) that only run when sent from the
-# chat. The conductor re-reads it when a command starts (/next, /review, /plan...), so edits apply
+# chat. Telebaton re-reads it when a command starts (/next, /review, /plan...), so edits apply
 # without a restart.
 
-# Conductor records this gate result for checkers; unchanged green trees need no full rerun.
+# Telebaton records this gate result for checkers; unchanged green trees need no full rerun.
 # Replace the tools/* commands below with your project's own scripts.
 [gate]
 build = "cmake --build --preset debug"

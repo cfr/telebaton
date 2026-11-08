@@ -1,4 +1,4 @@
-# Conductor design
+# Telebaton design
 
 A Telegram bridge that drives the iteration loop (one agent implements, another reviews and
 fixes) from one chat, so sessions no longer need manual renaming, exporting or switching between
@@ -21,9 +21,10 @@ text before work starts.
 
 ## Agents
 
-Each project carries its own config in `CONDUCTOR.toml` at the repo root, next to `AGENTS.md`;
+Each project carries its own config in `telebaton.toml` at the repo root, next to `AGENTS.md`;
 notes for humans are TOML comments. Commands pick an agent by name, or fall back to the role
 default.
+Legacy `CONDUCTOR.toml` is used when `telebaton.toml` is absent; role edits use the selected file.
 
 ```toml
 [gate]
@@ -62,7 +63,7 @@ tag = "opus55"
   e.g. `low`/`high`/`max` thinking); checked against opencode's model list when a session starts.
 - `[prompts]` overrides the text sent at each step (`implement`, `review`, `fix`, `fix_notes`,
   `feedback`, `feedback_again`, `feedback_fix`, `continue`, `gate_failed`, `plan`, `plan_done`,
-  `plan_read_only`, `plan_moved`, `chat`, `summary`; `CONDUCTOR.example.toml` lists the
+  `plan_read_only`, `plan_moved`, `chat`, `summary`; `telebaton.example.toml` lists the
   defaults); `{id}`, `{num}`, `{base}`, `{notes}`, `{step}`, `{output}`, `{findings}`, `{reply}`,
   `{topic}`, `{message}`, `{log}`, `{role}`, `{task}`, `{state}`, `{running}` and `{commits}` are
   filled in. `[logs] dir` sets the log directory (default `wlog`).
@@ -71,7 +72,7 @@ tag = "opus55"
 - `[gate]` is the verification the bridge runs after each committing step, in order; a
   non-zero exit fails it.
 - Machine-specific settings stay out of the repo, in the bridge's own gitignored
-  `../conductor/config.toml`: the project path, the bot token and the allowed Telegram user id.
+  `../telebaton/config.toml`: the project path, the bot token and the allowed Telegram user id.
 - The bridge checks the config at start: unknown harness, an `opencode` model missing from
   `opencode models`, duplicate tags or a role naming an unknown agent are errors.
 
@@ -83,7 +84,7 @@ The same loop as today, one command per step, with the bridge doing the bookkeep
    id), shows the id, the item text and the agent, and on confirmation starts a session with
    that agent (default `roles.implement`) titled with the id and the prompt `please do <id>`.
 2. The agent implements and commits. When the session goes idle the bridge runs the
-   verification gate itself (`[gate]` in `CONDUCTOR.toml`; here build followed by tests).
+   verification gate itself (`[gate]` in `telebaton.toml`; here build followed by tests).
    - Gate fails: the bridge sends the failure output back to the same session once ("the gate
      failed, fix it: ..."), then runs the gate again. A second failure is reported and the
      task waits for me.
@@ -128,7 +129,7 @@ review can turn into a discussion before `/fix`. Logs are exported throughout (s
 - `/next [agent] [id]`: start the next PLAN item (or a given one) with an agent from the
   config; arguments are told apart by shape (an id starts with digits)
 - `/review [agent] [id]`, `/fix [notes]`, `/feedback [agent]`: as above, for the current task
-  (`/review <id>` also takes a task done outside the conductor)
+  (`/review <id>` also takes a task done outside Telebaton)
 - `/continue [role] [notes]`: resume a turn that stopped early (an error, `/stop`, a restart)
 - `/skip`: interrupt and skip the current feedback step, then run the next checker or final
   review once pending work settles. The request survives restarts; completed skips are recorded
@@ -148,7 +149,7 @@ review can turn into a discussion before `/fix`. Logs are exported throughout (s
   and never forward credentials or raw error payloads. No inference,
   session mutation, persisted quota cache, or task-log entry is involved.
 - `/roles [role agents...]`: show defaults and current assignments, or edit one default in the
-  tracked `CONDUCTOR.toml` when no task or session is in progress. Show the diff and offer
+  tracked `telebaton.toml` when no task or session is in progress. Show the diff and offer
   commit / keep / discard; commits include only that config file. Scalar roles take one alias,
   feedback takes an ordered list. Kept role-only edits accumulate across commands and restarts;
   committing a later edit commits the whole batch, while discard undoes only the latest request.
@@ -268,7 +269,7 @@ cleanup, and interrupted waits cannot automatically advance after the jobs exit.
 inbox checks still apply; cleanup does not infer completion from missing shell jobs alone.
 
 Discovered child IDs, tool IDs, notification receipts and scan cursors persist with the session.
-Conductor retains a waiting turn and its gate retry budget, serializes wakeups, and rechecks every
+Telebaton retains a waiting turn and its gate retry budget, serializes wakeups, and rechecks every
 two seconds without prompting the model. Status errors hold the barrier instead of implying idle.
 Startup rediscovers pending work even if the previous process missed the resume event. New tasks,
 checkers and gates cannot replace or advance a waiting session; explicit continuation of that same
@@ -305,7 +306,7 @@ with its read-only `plan` agent, and its first message says another agent may be
 tree. It has its own busy flag, so it never waits for or blocks the task flow, and it is not reset
 by `/next`. Replies to its messages reach it; plain text keeps going to the task.
 
-`/summary [role] [agent]` asks how a session is going without disturbing it: the conductor exports
+`/summary [role] [agent]` asks how a session is going without disturbing it: Telebaton exports
 that session's log as it stands (the running one by default, else the focused one), and a fresh
 read-only session of `roles.summary` (default: the chat agent) reads it from the end and answers
 in a few bullets. The summary session is one-off: not kept in state, not logged, not resumed.
@@ -359,7 +360,7 @@ landed starts with `plan_moved` (their list), so the agent re-reads `PLAN.md` be
 - One agent writes to the tree at a time (the "no edits during parallel agent" rule as a lock);
   a step that would overlap is refused with the reason. Auto-review starts only after the
   implementation session is idle and its gate run is done.
-- Agents never push or deploy from the bridge. Project commands (`[commands]` in `CONDUCTOR.toml`,
+- Agents never push or deploy from the bridge. Project commands (`[commands]` in `telebaton.toml`,
   e.g. `/deploy`, `/serve`) run only when I send them, with a confirmation button where
   `confirm` is set, and a one-shot command never overlaps an agent turn or the gate.
   Both command types retain process-group ownership through stop cleanup, escalating to SIGKILL
@@ -376,11 +377,11 @@ landed starts with `plan_moved` (their list), so the agent re-reads `PLAN.md` be
 None right now.
 
 Codex usage is the delta between successive raw cumulative thread counters, including across
-resume and conductor restarts. Exports normalize legacy records idempotently, retain raw snapshots
+resume and Telebaton restarts. Exports normalize legacy records idempotently, retain raw snapshots
 and their provenance, and mark counter resets as new epochs. The historical rebuild tool updates
 idle saved sessions and matching log usage without changing transcript content.
 
-Codex uses `codex exec --json`, persists its thread id and event transcript beside conductor state,
+Codex uses `codex exec --json`, persists its thread id and event transcript beside Telebaton state,
 and uses `exec resume` for follow-up turns. Sandbox policy is set on every turn (read-only or
 workspace-write). Writable turns route on-request approvals through Codex auto-review so Git
 operations can be approved; read-only turns deny escalations. Exec cannot relay approvals to Telegram.

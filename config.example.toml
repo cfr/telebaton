@@ -1,5 +1,5 @@
 # Copy to config.toml (gitignored: it holds the bot token). Machine-specific settings only; the
-# project's agents, roles, gate and prompts live in the project's CONDUCTOR.toml.
+# project's agents, roles, gate and prompts live in the project's telebaton.toml.
 
 project = "~/Code/my-project"
 

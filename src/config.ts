@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { parse } from 'smol-toml';
@@ -354,8 +354,14 @@ export function parseProjectConfig(root: string, toml: string): ProjectConfig {
     return { root, logDir, gate, roles, feedbackRounds, agents, prompts, commands };
 }
 
+export function projectConfigPath(root: string): string {
+    const preferred = resolve(root, 'telebaton.toml');
+    const legacy = resolve(root, 'CONDUCTOR.toml');
+    return existsSync(preferred) || !existsSync(legacy) ? preferred : legacy;
+}
+
 export function loadProjectConfig(root: string): ProjectConfig {
-    return parseProjectConfig(root, readFileSync(resolve(root, 'CONDUCTOR.toml'), 'utf8'));
+    return parseProjectConfig(root, readFileSync(projectConfigPath(root), 'utf8'));
 }
 
 export function fill(template: string, vars: Record<string, string>): string {
