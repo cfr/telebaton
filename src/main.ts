@@ -64,7 +64,7 @@ process.on('unhandledRejection', (e) => console.error('unhandled:', describeErro
 
 try {
     await chat.start(() => {
-        console.log(`conductor: polling Telegram for ${local.project}`);
+        console.log(`Telebaton: polling Telegram for ${local.project}`);
         conductor.announce().catch((e: Error) => console.error('announce:', e.message));
     });
 } catch (e) {

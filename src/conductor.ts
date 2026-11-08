@@ -34,7 +34,7 @@ type Busy = Role | 'gate' | `/${string}` | null;
 const roles: readonly string[] = ['implement', 'feedback', 'review', 'plan'];
 
 const help = `/next [agent] [id] - start the next PLAN item (or a given one)
-/review [agent] [id] - review the current task (or a task done outside the conductor)
+/review [agent] [id] - review the current task (or a task done outside Telebaton)
 /fix [notes] - reviewer applies fixes and commits
 /feedback [agent] - run a feedback check of the current task now (one more round)
 /skip - skip the current feedback step and continue to the next checker or review
@@ -173,7 +173,7 @@ export class Conductor {
         this.claim(`/${c.name}`);
         try {
             await this.chat.send(`/${c.name}: running…`);
-            if (this.shuttingDown) throw new Error('conductor is shutting down');
+            if (this.shuttingDown) throw new Error('Telebaton is shutting down');
             const started = Date.now();
             const r = await this.jobs.run(c.name, cmd, this.project.root);
             const secs = ((Date.now() - started) / 1000).toFixed(0);
@@ -189,7 +189,7 @@ export class Conductor {
     }
 
     private async backgroundCommand(c: ProjectCommand, args: string) {
-        if (this.shuttingDown) throw new Error('conductor is shutting down');
+        if (this.shuttingDown) throw new Error('Telebaton is shutting down');
         if (this.startingCommands.has(c.name)) {
             await this.chat.send(`/${c.name} is already starting`);
             return;
@@ -214,7 +214,7 @@ export class Conductor {
                 return;
             }
             await this.chat.send(`/${c.name}: starting…`);
-            if (this.shuttingDown) throw new Error('conductor is shutting down');
+            if (this.shuttingDown) throw new Error('Telebaton is shutting down');
             const job = this.jobs.start(c.name, cmd, this.project.root, (j, code) => {
                 const how = j.stopping ? 'stopped' : `exited (code ${code})`;
                 void this.chat.sendLog(`/${c.name}: ${how}`, logTail(j.log, 15));
@@ -379,7 +379,7 @@ export class Conductor {
     }
 
     private claim(what: Busy) {
-        if (this.shuttingDown) throw new Error('conductor is shutting down');
+        if (this.shuttingDown) throw new Error('Telebaton is shutting down');
         if (this.recoveringWork) throw new Error('recovering session work; try again after /status');
         const waiting = this.waitingRole();
         if (waiting && waiting !== what) throw new Error(`${waiting} still has pending work; /status or /continue ${waiting}`);
@@ -500,7 +500,7 @@ export class Conductor {
         const found = items.find((i) => i.id === id || i.number === idNumber(id));
         const fullId = found?.id ?? (id.includes('-') ? id : this.findLoggedId(idNumber(id))) ?? id;
         this.dropTaskSessions();
-        this.state.task = found ?? { id: fullId, number: idNumber(id), text: '(done outside the conductor)' };
+        this.state.task = found ?? { id: fullId, number: idNumber(id), text: '(done outside Telebaton)' };
         this.state.taskComplete = false;
         this.state.sessions = this.keepSideSessions();
         this.state.lastGate = undefined;
@@ -1341,7 +1341,7 @@ export class Conductor {
                 await this.chat.send(`${p} ${what} is still running; its end is handled as usual`, role);
                 continue;
             }
-            await this.chat.send(`${p} ${what} ended while the conductor was down`, role);
+            await this.chat.send(`${p} ${what} ended while Telebaton was down`, role);
             await this.unsolicited(ref.id, { phase: 'ended', outcome: st.outcome, error: st.error });
         }
     }
@@ -1972,7 +1972,7 @@ export class Conductor {
                 await this.chat.send(`stopped leftover ${reaped.map((n) => `/${n}`).join(', ')} from a previous run`);
             }
             const s = this.state;
-            const text = `conductor up: ${this.project.root}${s.task ? `, task ${s.task.id}` : ''}. /help`;
+            const text = `Telebaton up: ${this.project.root}${s.task ? `, task ${s.task.id}` : ''}. /help`;
             const commands = new Map<string, string>();
             for (const line of this.help().split('\n')) {
                 const m = /^\/([a-z0-9_-]+)\b.*? - (.*)$/.exec(line);
