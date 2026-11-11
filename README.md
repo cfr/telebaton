@@ -70,8 +70,9 @@ chat = "codex"
 summary = "codex"
 ```
 
-`implement`, `review`, and `plan` are required. `feedback` is optional: one agent name or an ordered
-list. `chat` defaults to `plan`; `summary` defaults to `chat`. Commands can override the default
+`implement` and `plan` are required. Set `review = ""` or omit it to disable automatic review.
+`feedback` is optional: one agent name or an ordered list. `chat` defaults to `plan`; `summary`
+defaults to `chat`. Commands can override the default
 agent, for example `/next glm`, `/review codex`, or `/chat codex explain this subsystem`.
 
 Gate entries run in order from the project root; the first nonzero exit fails the gate.
@@ -109,11 +110,27 @@ The normal loop is:
    check. Later checkers receive earlier findings, rejection reasons, repairs, and gate evidence.
 4. The review agent checks the combined result. `/fix [notes]` asks that reviewer to apply fixes
    and commit; Telebaton runs the gate again. Review fixes require your instruction, normally `/fix`.
+   With automatic review disabled, the task finishes after feedback and any repair gate pass;
+   `/review <agent>` still starts a manual review, for example `/review sol`.
+
+`/next 0272..0280` runs an inclusive task range after one confirmation. Every number must appear
+exactly once under `PLAN.md` "Next". Tasks run in numeric order, each completing its gate and
+configured feedback/review flow before the next starts. `/next dsf 0272..0280` uses that implementer
+for the whole range; otherwise each task uses the current default. Task text is reread before
+each start. Findings requiring `/fix`, incomplete reports, failed turns and failed gates hold the
+queue until the current task is resolved. `/status` shows the remaining queue.
+
+`/stop` pauses the queue as well as interrupting active work. Finish the current task, then use
+`/next` to resume the remaining tasks without another confirmation. The queue survives restarts
+in a paused state. `/next cancel` clears future tasks without stopping the current one. Starting
+an explicitly selected single task replaces the queue only after confirmation.
 
 `[flow] feedback_rounds` defaults to the number of feedback agents; `0` skips feedback. Repeated
 names allow rechecks in the same session. A clean verdict or an answer without commits skips
 remaining consecutive rounds for that agent and moves to the next listed agent. If more rounds
 are configured than names, the last agent repeats. `/feedback [agent]` adds a check manually.
+For example, `feedback = ["glm", "k3", "sol", "sol"]` with `review = ""` lets Sol check the
+implementer's repairs on its second pass; a clean first Sol pass skips the redundant second pass.
 
 Agents follow the project's instructions for commits and for moving completed tasks from
 `PLAN.md` to `CHANGELOG.md`. Telebaton does not edit those files. Gate output, commit summaries,
@@ -131,7 +148,7 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 | `/review [agent] [id]` | Review the current task or adopt work done outside Telebaton. |
 | `/fix [notes]` | Apply review fixes in the reviewer session. |
 | `/feedback [agent]` | Run another feedback check. |
-| `/skip` | Skip the current feedback checker and continue to the next checker or final review. |
+| `/skip` | Skip the current feedback checker, then continue or finish if automatic review is disabled. |
 | `/continue [role] [notes]` | Resume a stopped turn or complete a pending report. |
 | `/gate` | Verify the focused implementation/review session's commits and continue the flow. |
 | `/todo [id]` | List Next items or show one in full, without an agent. |
@@ -146,7 +163,7 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 | `/agents` | List configured agent aliases and models. |
 | `/usage` | Read account quotas, reset times, and available API balances. |
 | `/roles` | Show configured role defaults and current task assignments. |
-| `/roles <role> <agents...>` | Edit role defaults while no task or session is in progress. |
+| `/roles <role> <agents...>` | Edit role defaults while idle; `/roles review ""` disables automatic review. |
 | `/swap <agent1> <agent2>` | Exchange two uniquely assigned role defaults. |
 | `/agent <alias>` | Hand off the current task's focused role, then wait for `/continue`. |
 | `/log` | Export session logs and the current finding summary. |

@@ -248,11 +248,15 @@ export function parseProjectConfig(root: string, toml: string): ProjectConfig {
 
     const r = table(t.roles, 'roles');
     const roles = {} as ProjectConfig['roles'];
-    for (const role of ['implement', 'review', 'plan'] as const) {
+    for (const role of ['implement', 'plan'] as const) {
         roles[role] = str(r, role, 'roles');
         if (!agents.has(roles[role])) {
             throw new Error(`roles.${role} names unknown agent "${roles[role]}"`);
         }
+    }
+    roles.review = r.review === undefined || r.review === '' ? '' : str(r, 'review', 'roles');
+    if (roles.review && !agents.has(roles.review)) {
+        throw new Error(`roles.review names unknown agent "${roles.review}"`);
     }
     roles.chat = r.chat === undefined ? roles.plan : str(r, 'chat', 'roles');
     roles.summary = r.summary === undefined ? roles.chat : str(r, 'summary', 'roles');

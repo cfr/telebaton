@@ -127,6 +127,13 @@ test('feedback rounds need a feedback agent and default to one', () => {
     assert.throws(() => parseProjectConfig('/r', base.replace('plan = "opus"', 'plan = "opus"\nfeedback = "x"')), /unknown agent/);
 });
 
+test('automatic review can be disabled with an empty or omitted role', () => {
+    assert.equal(parseProjectConfig('/r', base.replace('review = "opus"', 'review = ""')).roles.review, '');
+    assert.equal(parseProjectConfig('/r', base.replace('review = "opus"', '')).roles.review, '');
+    assert.throws(() => parseProjectConfig('/r', base.replace('review = "opus"', 'review = false')), /roles.review/);
+    assert.throws(() => parseProjectConfig('/r', base.replace('implement = "glm"', 'implement = ""')), /implement/);
+});
+
 test('feedback takes a list of agents, one round each by default', () => {
     const list = (v: string) => base.replace('plan = "opus"', `plan = "opus"\nfeedback = ${v}`);
     assert.deepEqual(parseProjectConfig('/r', base).roles.feedback, []);

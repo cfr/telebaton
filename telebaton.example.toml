@@ -14,6 +14,7 @@ test = "ctest --preset debug --output-on-failure"
 implement = "glm"
 # one agent or a list: round n of the feedback checks goes to the nth, the last one repeating
 feedback = ["dsf", "glm"]
+# Set to "" (or omit) to finish after feedback; /review <agent> still works manually.
 review = "opus"
 plan = "opus"
 

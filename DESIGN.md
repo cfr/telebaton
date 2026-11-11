@@ -102,14 +102,29 @@ The same loop as today, one command per step, with the bridge doing the bookkeep
      to step 3 when none is left; so does the last round. Mechanical misses get fixed before the
      expensive review, and the code stays the implementer's: the checker never edits. `/feedback
      [agent]` runs one more round by hand.
-3. Auto-review: the bridge starts a review session (`roles.review`) with `please review <id>`
+3. Auto-review: when `roles.review` names an agent, the bridge starts a review session with `please review <id>`
    (the same context `AGENTS.md` gives an interactive session) and posts the findings.
    Reviewing does not touch the tree, so it needs no confirmation. `/review [agent]` starts or
    restarts a review by hand, e.g. with a different agent, or after a gate failure I fixed
-   myself.
+   myself. An empty `review = ""` or omitted review role disables automatic review: the task
+   completes after feedback and successful repair gates. `/review <agent>` remains available;
+   `/review` without an agent explains that a manual reviewer must be specified.
 4. `/fix` (optionally with notes, e.g. `/fix skip 3, item 1 can be a follow-up`): the reviewer
    applies the fixes in the same session and commits; the bridge runs the gate again (same
    one-retry rule) and posts the result. This step always waits for me, since it commits.
+
+`/next [agent] NNNN..NNNN` confirms an inclusive range once. Every number must resolve to exactly
+one item under PLAN.md Next; the bridge persists the remaining IDs and optional implementer
+override in `state.taskQueue`. It rereads each queued item and current configuration before
+starting it. Only task completion (clean final review, gated review repair, or completed feedback
+when automatic review is disabled) advances the queue. Findings, incomplete reports, failed
+turns, pending work and failed gates hold it on the current task. Queue advancement is serialized
+so nested completion callbacks cannot start the same item twice.
+
+`/stop` pauses the queue before interrupting work; `/next` resumes it once the current task is
+complete. Restart preserves the queue paused and does not start agents automatically. `/next
+cancel` clears future tasks without interrupting current work. A confirmed explicit single-task
+start replaces the queue. `/status` includes the remaining IDs and paused state.
 
 `CHANGELOG.md` stays with the agents, as today: the implementing agent moves its item from
 `PLAN.md` "Next" to `CHANGELOG.md` in its commit (`AGENTS.md` asks for that), and the reviewer
@@ -151,7 +166,8 @@ review can turn into a discussion before `/fix`. Logs are exported throughout (s
 - `/roles [role agents...]`: show defaults and current assignments, or edit one default in the
   tracked `telebaton.toml` when no task or session is in progress. Show the diff and offer
   commit / keep / discard; commits include only that config file. Scalar roles take one alias,
-  feedback takes an ordered list. Kept role-only edits accumulate across commands and restarts;
+  feedback takes an ordered list. `/roles review ""` disables automatic review.
+  Kept role-only edits accumulate across commands and restarts;
   committing a later edit commits the whole batch, while discard undoes only the latest request.
   Reject unrelated config changes. Preserve unrelated config, comments and explicit flow settings.
 - `/agent <alias>`: hand off the current task's focused role without changing defaults. Stop the
@@ -228,8 +244,10 @@ Stable finding IDs, category, source agent/model/role/session/SHA, evidence, rel
 repair dispositions and actual fixing commits survive session replacement. Claimed fixes and
 checker verification are distinct; a verifier must use another session and a SHA containing the
 fixes. New checkers see rejection reasons so they can assess them rather than repeat paperwork.
-Final review also verifies the last feedback repair; findings fixed by `/fix` remain unverified
-until another review assesses them. Ledger receipts are retained and replayed reports are
+When configured, final review also verifies the last feedback repair. With automatic review
+disabled, a repeated final feedback agent can verify its preceding repair; repairs after the last
+configured round remain verification-pending. Findings fixed by `/fix` remain unverified until
+another review assesses them. Ledger receipts are retained and replayed reports are
 idempotent. `wlog/<task>-findings.md` exports the ledger and links to the original session logs.
 
 The bridge records gate commands, SHA, time, result and full output in `wlog/<task>-gate.log`.

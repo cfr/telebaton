@@ -63,7 +63,9 @@ export function editRoleDefaults(root: string, text: string, role: string, names
     if (!names.length) throw new Error(`${role} requires at least one agent`);
     if (role !== 'feedback' && names.length !== 1) throw new Error(`${role} requires exactly one agent`);
     const config = parseProjectConfig(root, text);
-    for (const name of names) if (!config.agents.has(name)) throw new Error(`unknown agent "${name}"; see /agents`);
+    for (const name of names) if (!(role === 'review' && name === '') && !config.agents.has(name)) {
+        throw new Error(`unknown agent "${name}"; see /agents`);
+    }
     const lines = text.split('\n');
     const start = lines.findIndex((line) => /^\s*\[roles\]\s*(?:#.*)?$/.test(line));
     if (start < 0) throw new Error('add a [roles] table to the project configuration before editing roles');

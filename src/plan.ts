@@ -4,6 +4,21 @@ export interface PlanItem {
     text: string;
 }
 
+export function taskRange(items: PlanItem[], range: string): PlanItem[] {
+    const match = /^(\d{4})\.\.(\d{4})$/.exec(range);
+    if (!match) throw new Error('use /next [agent] NNNN..NNNN for an inclusive task range');
+    const first = Number(match[1]), last = Number(match[2]);
+    if (first > last) throw new Error('task range must be ascending');
+    const selected: PlanItem[] = [];
+    for (let n = first; n <= last; n++) {
+        const number = String(n).padStart(4, '0');
+        const matches = items.filter((item) => item.number === number);
+        if (matches.length !== 1) throw new Error(`task ${number} must appear exactly once in PLAN.md Next (found ${matches.length})`);
+        selected.push(matches[0]);
+    }
+    return selected;
+}
+
 function nextSection(plan: string): string[] {
     const lines = plan.split('\n');
     const start = lines.findIndex((l) => /^## Next\s*$/.test(l));

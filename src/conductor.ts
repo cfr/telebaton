@@ -21,7 +21,7 @@ import { FeedbackTracker, feedbackContract, commitGuidance } from './feedback.ts
 import { escapeHtml } from './format.ts';
 import { Jobs, logTail, readLog } from './jobs.ts';
 import { renderMarkdown, usageMetadata } from './logs/markdown.ts';
-import { emptyNextMessage, idNumber, nextReport, parseNext, summary, type PlanItem } from './plan.ts';
+import { emptyNextMessage, idNumber, nextReport, parseNext, summary, taskRange, type PlanItem } from './plan.ts';
 import { git, tail } from './proc.ts';
 import * as repo from './repo.ts';
 import type { SessionRef, State, Store } from './state.ts';
@@ -34,10 +34,11 @@ type Busy = Role | 'gate' | `/${string}` | null;
 const roles: readonly string[] = ['implement', 'feedback', 'review', 'plan'];
 
 const help = `/next [agent] [id] - start the next PLAN item (or a given one)
+/next [agent] NNNN..NNNN - run an inclusive task range; /next resumes, /next cancel clears the queue
 /review [agent] [id] - review the current task (or a task done outside Telebaton)
 /fix [notes] - reviewer applies fixes and commits
 /feedback [agent] - run a feedback check of the current task now (one more round)
-/skip - skip the current feedback step and continue to the next checker or review
+/skip - skip the current feedback step, then continue or finish
 /continue [role] [notes] - resume a turn that stopped early (error, /stop, restart)
 /gate - run the gate on the current session's commits now, then continue as after a turn
 /todo [id] - list PLAN.md "Next" items (or show one in full)
@@ -77,6 +78,7 @@ export class Conductor {
     private planBusy = false;
     // Turns and the steps that follow them (gate, feedback, review), counting the gaps where `busy` is null.
     private flowing = 0;
+    private advancingQueue = false;
     private workPoll?: ReturnType<typeof setInterval>;
     private drainingWork = false;
     private recoveringWork = false;
@@ -410,14 +412,42 @@ export class Conductor {
     }
 
     private async nextTask(args: string) {
+        if (args.trim() === 'cancel') {
+            this.state.taskQueue = undefined;
+            this.store.save();
+            await this.chat.send('task queue cleared; the current task is unchanged');
+            return;
+        }
         this.requireIdleFlow();
         this.requireSettledWork();
         this.reload();
         const { agent: agentArg, id } = this.parseArgs(args);
+        if (!args.trim() && this.state.taskQueue) {
+            if (this.taskInProgress()) throw new Error('finish the current task with /continue or /fix before resuming the queue');
+            this.state.taskQueue.paused = false;
+            this.store.save();
+            await this.advanceQueue();
+            return;
+        }
         const agentName = agentArg ?? this.project.roles.implement;
         const agent = this.agent(agentName);
         const plan = readFileSync(join(this.project.root, 'PLAN.md'), 'utf8');
         const items = parseNext(plan);
+        if (id?.includes('..')) {
+            if (this.taskInProgress()) throw new Error('finish the current task before starting a task range');
+            const selected = taskRange(items, id);
+            this.claim('implement');
+            try {
+                const go = await this.chat.ask(`Run ${selected.length} tasks (${id}) with ${agent.tag}?\n\n` +
+                    selected.map(summary).join('\n') + '\n\nEach task completes its gate and configured checks before the next starts. ' +
+                    '/stop pauses the queue; /next cancel clears it.', ['start', 'cancel'], false);
+                if (go !== 'start') return;
+                this.state.taskQueue = { ids: selected.map((item) => item.id), agent: agentArg };
+                this.store.save();
+            } finally { this.busy = null; }
+            await this.advanceQueue();
+            return;
+        }
         let item: PlanItem | undefined;
         if (id) {
             item = items.find((i) => i.id === id || i.number === idNumber(id));
@@ -441,23 +471,66 @@ export class Conductor {
             if (go !== 'start') {
                 return;
             }
-            this.dropTaskSessions();
-            this.state.task = item;
-            this.state.taskComplete = false;
-            this.state.sessions = this.keepSideSessions();
-            this.state.focus = 'implement';
-            this.state.lastGate = undefined;
-            this.state.feedbackRound = undefined;
-            this.state.feedbackFixing = undefined;
-            this.state.feedbackFindingIds = undefined;
-            this.state.feedbackFixBase = undefined;
-            this.state.feedbackDispositionPending = undefined;
-            this.state.workConflict = undefined;
-            await this.createSession('implement', agentName, item.id);
+            this.state.taskQueue = undefined;
+            await this.prepareTask(item, agentName);
         } finally {
             this.busy = null;
         }
         await this.turn('implement', fill(this.project.prompts.implement, this.vars()), `implementing ${item.id}`);
+    }
+
+    private async prepareTask(item: PlanItem, agentName: string) {
+        this.dropTaskSessions();
+        this.state.task = item;
+        this.state.taskComplete = false;
+        this.state.sessions = this.keepSideSessions();
+        this.state.focus = 'implement';
+        this.state.lastGate = undefined;
+        this.state.feedbackRound = undefined;
+        this.state.feedbackFixing = undefined;
+        this.state.feedbackFindingIds = undefined;
+        this.state.feedbackFixBase = undefined;
+        this.state.feedbackDispositionPending = undefined;
+        this.state.workConflict = undefined;
+        await this.createSession('implement', agentName, item.id);
+    }
+
+    private async advanceQueue() {
+        if (this.advancingQueue || this.shuttingDown || this.recoveringWork) return;
+        this.advancingQueue = true;
+        try {
+            while (this.state.taskQueue && !this.state.taskQueue.paused && !this.taskInProgress()) {
+                const queue = this.state.taskQueue;
+                this.requireSettledWork();
+                this.reload();
+                if (queue.current && (!this.state.lastGate?.ok || this.state.lastGate.sha !== await repo.head(this.project.root) ||
+                    JSON.stringify(this.state.lastGate.commands) !== JSON.stringify(this.project.gate.map((step) => step.cmd)))) {
+                    throw new Error(`task queue paused: ${queue.current} needs a successful gate at the current commit and configuration`);
+                }
+                if (!queue.ids.length) {
+                    this.state.taskQueue = undefined;
+                    this.store.save();
+                    await this.chat.send('task range complete');
+                    return;
+                }
+                const items = parseNext(readFileSync(join(this.project.root, 'PLAN.md'), 'utf8'));
+                const matches = items.filter((item) => item.id === queue.ids[0]);
+                if (matches.length !== 1) throw new Error(`queued task ${queue.ids[0]} must appear exactly once in PLAN.md Next`);
+                const agent = queue.agent ?? this.project.roles.implement;
+                this.agent(agent);
+                this.claim('implement');
+                try {
+                    await this.prepareTask(matches[0], agent);
+                    queue.ids.shift();
+                    queue.current = matches[0].id;
+                    this.store.save();
+                } finally { this.busy = null; }
+                await this.turn('implement', fill(this.project.prompts.implement, this.vars()), `implementing ${matches[0].id} (queued)`);
+            }
+        } catch (e) {
+            if (this.state.taskQueue) { this.state.taskQueue.paused = true; this.store.save(); }
+            throw e;
+        } finally { this.advancingQueue = false; }
     }
 
     private async todo(args: string) {
@@ -481,6 +554,11 @@ export class Conductor {
         this.requireIdleFlow();
         this.reload();
         const { agent, id } = this.parseArgs(args);
+        const reviewer = agent ?? this.project.roles.review;
+        if (!reviewer) {
+            await this.chat.send('automatic review is disabled; use /review <agent> for a manual review');
+            return;
+        }
         if (id && id !== this.state.task?.id && idNumber(id) !== this.state.task?.number) {
             if (this.busy) {
                 throw new Error(`busy: ${this.busy} is running (/status, /stop)`);
@@ -491,7 +569,7 @@ export class Conductor {
             await this.chat.send('no current task; /next, or /review <id> for work done outside');
             return;
         }
-        await this.startReview(agent ?? this.project.roles.review);
+        await this.startReview(reviewer);
     }
 
     private adoptTask(id: string) {
@@ -542,8 +620,21 @@ export class Conductor {
         if (next) {
             await this.runFeedback(next);
         } else {
-            await this.startReview(this.project.roles.review);
+            await this.finishFeedback();
         }
+    }
+
+    private async finishFeedback(why?: string) {
+        this.requireSettledWork();
+        if (this.project.roles.review) {
+            if (why) await this.chat.send(`${why}; on to the review`);
+            await this.startReview(this.project.roles.review);
+            return;
+        }
+        this.state.taskComplete = true;
+        this.store.save();
+        await this.chat.send(`${why ? `${why}; ` : ''}${this.state.task!.id} done; /next when ready`);
+        await this.advanceQueue();
     }
 
     // Nothing to recheck: the current agent's remaining rounds are skipped and the next listed agent checks afresh.
@@ -563,8 +654,7 @@ export class Conductor {
             await this.runFeedback(next, overridden);
             return;
         }
-        await this.chat.send(`${why}; on to the review`);
-        await this.startReview(this.project.roles.review);
+        await this.finishFeedback(why);
     }
 
     private async feedbackCommand(args: string) {
@@ -626,9 +716,11 @@ export class Conductor {
         this.state.feedbackReportRetried = undefined;
         this.store.save();
         const next = this.nextFeedbackAgent();
-        await this.chat.send(`feedback step ${round} skipped by request; ${next ? `next check by ${this.agent(next).tag}` : 'on to the review'}`);
-        if (next) await this.runFeedback(next, true);
-        else await this.startReview(this.project.roles.review);
+        const why = `feedback step ${round} skipped by request`;
+        if (next) {
+            await this.chat.send(`${why}; next check by ${this.agent(next).tag}`);
+            await this.runFeedback(next, true);
+        } else await this.finishFeedback(why);
     }
 
     private async runFeedback(agentName: string, freshPrompt = false) {
@@ -747,6 +839,7 @@ export class Conductor {
             ref.reportRetried = undefined;
             this.state.taskComplete = receipt.findingIds.length === 0;
             this.store.save();
+            if (this.state.taskComplete) await this.advanceQueue();
             return;
         }
         if (ref.reportRetried) {
@@ -1621,6 +1714,7 @@ export class Conductor {
             this.state.taskComplete = true;
             this.store.save();
             await this.chat.send(`${task?.id ?? 'task'} done; /next when ready`);
+            await this.advanceQueue();
         }
     }
 
@@ -1688,6 +1782,11 @@ export class Conductor {
 
     private async stop(args = '') {
         if (args && args !== 'plan' && args !== 'chat') throw new Error('usage: /stop [chat|plan]');
+        if (!args && this.state.taskQueue) {
+            this.state.taskQueue.paused = true;
+            this.store.save();
+            await this.chat.send('task queue paused; finish the current task, then /next to resume, or /next cancel');
+        }
         if (args === 'chat') {
             if (this.chatBusy) {
                 await this.interruptSession('chat');
@@ -1755,7 +1854,7 @@ export class Conductor {
     private roleList(): string {
         const lines = ['Defaults:', ...defaultRoles.map((role) => {
             const value = this.project.roles[role];
-            return `  ${role}: ${Array.isArray(value) ? value.join(' ') || '(none)' : value}`;
+            return `  ${role}: ${Array.isArray(value) ? value.join(' ') || '(none)' : value || '(disabled)'}`;
         })];
         if (this.taskInProgress()) {
             lines.push('', `Current task: ${this.state.task!.id}`);
@@ -1775,6 +1874,7 @@ export class Conductor {
         this.reload();
         const [role, ...names] = args.trim().split(/\s+/).filter(Boolean);
         if (!role) { await this.chat.send(this.roleList()); return; }
+        if (role === 'review' && names.length === 1 && names[0] === '""') names[0] = '';
         await this.changeRoleDefaults('/roles', (text) => editRoleDefaults(this.project.root, text, role, names));
     }
 
@@ -1944,6 +2044,7 @@ export class Conductor {
             `task: ${escapeHtml(s.task?.id ?? '-')}`,
             `running: ${escapeHtml(this.runningTask() ?? 'nothing')}${this.planBusy ? ' (plan answering)' : ''}${this.chat.pendingQuestions() ? ` (${this.chat.pendingQuestions()} question(s) waiting)` : ''}`,
             `focus: ${s.focus ?? '-'}${this.chatBusy ? ' (chat answering)' : ''}`,
+            ...(s.taskQueue ? [`task queue${s.taskQueue.paused ? ' (paused)' : ''}: ${escapeHtml(s.taskQueue.ids.join(', ') || 'last task in progress')}`] : []),
             ...(s.workConflict ? [`verification required: ${escapeHtml(s.workConflict)}`] : []),
             ...(s.feedbackSkips?.filter((skip) => skip.task === s.task?.id)
                 .map((skip) => `skipped feedback: round ${skip.round}, ${escapeHtml(skip.agent)} (${skip.at})`) ?? []),
@@ -1972,6 +2073,12 @@ export class Conductor {
                 await this.chat.send(`stopped leftover ${reaped.map((n) => `/${n}`).join(', ')} from a previous run`);
             }
             const s = this.state;
+            if (s.taskQueue) {
+                // Session creation saves before the queue cursor is advanced.
+                if (s.sessions.implement && s.taskQueue.ids[0] === s.task?.id) s.taskQueue.ids.shift();
+                s.taskQueue.paused = true;
+                this.store.save();
+            }
             const text = `Telebaton up: ${this.project.root}${s.task ? `, task ${s.task.id}` : ''}. /help`;
             const commands = new Map<string, string>();
             for (const line of this.help().split('\n')) {
@@ -1982,6 +2089,7 @@ export class Conductor {
             }
             commands.set('help', 'commands');
             await this.chat.takeOver(text, [...commands].map(([command, description]) => ({ command, description })));
+            if (s.taskQueue) await this.chat.send('saved task queue paused after restart; finish the current task, then /next to resume');
             await this.recoverPendingWork();
             await this.recoverTurns();
         } finally { this.recoveringWork = false; }

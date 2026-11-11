@@ -28,6 +28,7 @@ interface Harness {
     settle(role: 'implement', result: TurnResult): Promise<{ waiting: boolean }>;
     drainWork(): Promise<void>;
     startReview(agent: string): Promise<void>;
+    review(args: string): Promise<void>;
     shutdown(): Promise<void>;
     announce(): Promise<void>;
     stop(args?: string): Promise<void>;
@@ -45,7 +46,7 @@ const feedback = (findings: unknown[], verifications: unknown[] = [], verdict = 
 const finding = { key: 'bug', category: 'bug', summary: 'Routing skips prediction', location: 'code.txt:1', evidence: 'late arrival probe fails' };
 const answer = 'Fixed.\n```conductor-dispositions\n' + JSON.stringify({ dispositions: [{ id: '0170-F01', status: 'fixed', reason: 'Regression fails without fix' }] }) + '\n```';
 
-function setup(feedbackReplies: string[]) {
+function setup(feedbackReplies: string[], defaults: { review?: string; feedback?: string[] } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'conductor-workflow-'));
     const project = join(dir, 'project');
     mkdirSync(project);
@@ -61,9 +62,9 @@ function setup(feedbackReplies: string[]) {
 all = "echo passed >> gate-count"
 [roles]
 implement = "kimi"
-review = "sol"
+review = ${JSON.stringify(defaults.review ?? 'sol')}
 plan = "sol"
-feedback = ["ds", "glm", "mm"]
+${defaults.feedback?.length === 0 ? '' : `feedback = ${JSON.stringify(defaults.feedback ?? ['ds', 'glm', 'mm'])}`}
 [agents.kimi]
 harness="codex"
 model="test-kimi"
@@ -119,7 +120,7 @@ feedback_fix="Custom repair prompt: {findings}"
                     // Only the actual repair turn commits; report correction turns do not.
                     if (implementationCommits && !text.includes('Do not edit files or commit during this correction')) repair();
                     last = implementationReplies.shift() ?? answer;
-                } else if (agent.name === 'sol') {
+                } else if (agent.name === 'sol' && opts.title.includes(' review')) {
                     if (store.state.sessions.review?.fixingFindings) { repair(); last = reviewFixReplies.shift() ?? answer; }
                     else last = reviewReplies.shift() ?? feedback([]);
                 }
@@ -162,6 +163,236 @@ feedback_fix="Custom repair prompt: {findings}"
         setImplementationOutcome(outcome: TurnResult['outcome']) { implementationOutcome = outcome; },
         records: new FindingStore(join(dir, 'state', 'findings')) };
 }
+
+test('disabled automatic review completes after the gate and explicit manual review still works', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    try {
+        await f.h.afterImplementGate();
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.prompts.length, 0);
+        assert.match(f.h.roleList(), /review: \(disabled\)/);
+        await f.h.review('');
+        assert.match(f.sent.at(-1)!, /use \/review <agent>/);
+        assert.equal(f.prompts.length, 0);
+        f.setReviewReplies([feedback([finding])]);
+        await f.h.review('sol');
+        assert.equal(f.store.state.sessions.review?.agent, 'sol');
+        assert.equal(f.store.state.taskComplete, false);
+        assert.equal(f.records.read('0170-task').findings.length, 1);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+function queuedPlan(f: ReturnType<typeof setup>) {
+    writeFileSync(join(f.project, 'PLAN.md'), '# Plan\n\n## Next\n' +
+        '- 0171-first: first task\n- 0172-second: second task\n- 0173-third: third task\n');
+    f.git('add', 'PLAN.md'); f.git('commit', '-qm', 'Plan range');
+    f.store.state.taskComplete = true;
+    f.store.save();
+}
+
+test('a confirmed inclusive range completes each pipeline before starting the next task', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    let confirmations = 0;
+    f.chat.ask = async (text) => { confirmations++; assert.match(text, /0171-first.*first task/s); return 'start'; };
+    try {
+        await f.h.nextTask('0171..0173');
+        assert.equal(confirmations, 1);
+        assert.deepEqual(f.prompts.map((p) => /^please do (\S+)/.exec(p.text)?.[1]),
+            ['0171-first', '0172-second', '0173-third']);
+        assert.equal(f.store.state.task?.id, '0173-third');
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.taskQueue, undefined);
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\npassed\npassed\n');
+        assert.equal(f.sent.at(-1), 'task range complete');
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('range validation and cancellation do not replace task state or start agents', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    try {
+        await assert.rejects(f.h.nextTask('0171..0174'), /0174.*found 0/);
+        await assert.rejects(f.h.nextTask('0173..0171'), /ascending/);
+        f.chat.ask = async () => 'cancel';
+        await f.h.nextTask('0171..0173');
+        assert.equal(f.store.state.task?.id, '0170-task');
+        assert.equal(f.store.state.taskQueue, undefined);
+        assert.equal(f.prompts.length, 0);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a review with findings holds the queue and a successful fix advances it', async () => {
+    const f = setup([], { feedback: [] });
+    queuedPlan(f);
+    f.chat.ask = async () => 'start';
+    f.setReviewReplies([feedback([finding]), feedback([])]);
+    try {
+        await f.h.nextTask('0171..0172');
+        assert.equal(f.store.state.task?.id, '0171-first');
+        assert.equal(f.store.state.taskComplete, false);
+        assert.deepEqual(f.store.state.taskQueue?.ids, ['0172-second']);
+        f.setReviewFixReplies([answer.replaceAll('0170-F01', '0171-F01')]);
+        await f.h.fix('');
+        assert.equal(f.store.state.task?.id, '0172-second');
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.taskQueue, undefined);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('stop pauses future tasks and /next resumes a persisted queue without another confirmation', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.store.state.taskQueue = { ids: ['0171-first', '0172-second'] };
+    await f.h.stop();
+    assert.equal(f.store.state.taskQueue.paused, true);
+    const store = new Store(f.local.stateFile);
+    const restarted = new Conductor(f.local, store, f.chat) as unknown as Harness;
+    restarted.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
+    // The fake adapter closes over the fixture's Store, just as the live adapter reads persisted state.
+    f.store.state = store.state;
+    f.chat.ask = async () => { throw new Error('queue must not ask again'); };
+    try {
+        await restarted.nextTask('');
+        assert.equal(store.state.task?.id, '0172-second');
+        assert.equal(store.state.taskComplete, true);
+        assert.equal(store.state.taskQueue, undefined);
+    } finally { await restarted.shutdown(); await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('unfinished tasks and changed queued PLAN items block queue progress without dropping work', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.store.state.taskQueue = { ids: ['0171-first', '0174-missing'] };
+    f.store.state.taskComplete = false;
+    try {
+        await assert.rejects(f.h.nextTask(''), /finish the current task/);
+        f.store.state.taskComplete = true;
+        await assert.rejects(f.h.nextTask(''), /0174-missing.*exactly once/);
+        assert.equal(f.store.state.task?.id, '0171-first');
+        assert.equal(f.store.state.taskQueue?.paused, true);
+        assert.deepEqual(f.store.state.taskQueue?.ids, ['0174-missing']);
+        await f.h.nextTask('cancel');
+        assert.equal(f.store.state.taskQueue, undefined);
+        assert.equal(f.store.state.task?.id, '0171-first');
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a failed implementation leaves remaining queued tasks untouched', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.chat.ask = async () => 'start';
+    f.setImplementationOutcome('failed');
+    try {
+        await f.h.nextTask('0171..0172');
+        assert.equal(f.prompts.length, 1);
+        assert.equal(f.store.state.task?.id, '0171-first');
+        assert.equal(f.store.state.taskComplete, false);
+        assert.deepEqual(f.store.state.taskQueue?.ids, ['0172-second']);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('queue advancement requires the completed task gate even after a manual completion', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.chat.ask = async () => 'start';
+    f.setImplementationOutcome('failed');
+    try {
+        await f.h.nextTask('0171..0172');
+        f.store.state.taskComplete = true;
+        await assert.rejects(f.h.nextTask(''), /0171-first needs a successful gate/);
+        assert.equal(f.store.state.taskQueue?.paused, true);
+        assert.deepEqual(f.store.state.taskQueue?.ids, ['0172-second']);
+        assert.equal(f.prompts.length, 1);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('startup pauses a saved range and repairs a cursor saved during session creation', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.store.state.taskQueue = { ids: ['0170-task', '0171-first'] };
+    try {
+        await f.h.announce();
+        assert.equal(f.store.state.taskQueue?.paused, true);
+        assert.deepEqual(f.store.state.taskQueue?.ids, ['0171-first']);
+        assert.equal(f.prompts.length, 0);
+        assert.equal(new Store(f.local.stateFile).state.taskQueue?.paused, true);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('stop during a range prevents automatic advancement after the current gate completes', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.chat.ask = async () => 'start';
+    const send = f.chat.send;
+    let stopped = false;
+    f.chat.send = async (text) => {
+        await send(text);
+        if (!stopped && text.startsWith('gate passed')) { stopped = true; await f.h.stop(); }
+    };
+    try {
+        await f.h.nextTask('0171..0172');
+        assert.equal(f.store.state.task?.id, '0171-first');
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.taskQueue?.paused, true);
+        assert.deepEqual(f.store.state.taskQueue?.ids, ['0172-second']);
+        await f.h.nextTask('');
+        assert.equal(f.store.state.task?.id, '0172-second');
+        assert.equal(f.store.state.taskQueue, undefined);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a repeated final feedback agent verifies repairs before completing without automatic review', async () => {
+    const f = setup([feedback([]), feedback([]), feedback([finding]), feedback([], [
+        { id: '0170-F01', status: 'verified', reason: 'Independent regression check at repaired SHA' },
+    ])], { review: '', feedback: ['ds', 'glm', 'sol', 'sol'] });
+    try {
+        await f.h.afterImplementGate();
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'glm', 'sol', 'kimi', 'sol']);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.sessions.review, undefined);
+        assert.equal(f.records.read('0170-task').findings[0].verification, 'verified');
+        assert.match(f.prompts.at(-1)!.text, /0170-F01/);
+        assert.match(f.sent.at(-1)!, /done; \/next when ready/);
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
+        const restarted = new Store(f.local.stateFile);
+        assert.equal(restarted.state.taskComplete, true);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a clean final feedback skips redundant rounds with automatic review disabled', async () => {
+    const f = setup([feedback([])], { review: '', feedback: ['ds', 'ds'] });
+    try {
+        await f.h.afterImplementGate();
+        assert.equal(f.prompts.length, 1);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.sessions.review, undefined);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('incomplete feedback cannot complete a task without automatic review, but an explicit skip can', async () => {
+    const f = setup(['incomplete', 'still incomplete'], { review: '', feedback: ['ds'] });
+    try {
+        await f.h.afterImplementGate();
+        assert.notEqual(f.store.state.taskComplete, true);
+        assert.match(f.sent.at(-1)!, /task flow paused/);
+        await f.h.skipFeedback();
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.feedbackSkips?.length, 1);
+        assert.equal(f.store.state.sessions.review, undefined);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('failed repair gates cannot complete a task with automatic review disabled', async () => {
+    const f = setup([feedback([finding])], { review: '', feedback: ['ds'] });
+    f.h.project.gate = [{ name: 'all', cmd: 'exit 1' }];
+    try {
+        await f.h.afterImplementGate();
+        assert.notEqual(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.lastGate?.ok, false);
+        assert.equal(f.store.state.sessions.review, undefined);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
 
 test('full feedback flow records actual repair commits, passes ledger/gate context and exports findings', async () => {
     const f = setup([
@@ -612,10 +843,8 @@ test('skip cannot bypass implementation or pending feedback repair dispositions'
 });
 
 test('skip consumes exactly one round when the next round uses the same checker', async () => {
-    const f = setup([feedback([]), feedback([])]);
+    const f = setup([feedback([]), feedback([])], { feedback: ['ds', 'ds', 'mm'] });
     try {
-        const config = join(f.project, 'telebaton.toml');
-        writeFileSync(config, readFileSync(config, 'utf8').replace('["ds", "glm", "mm"]', '["ds", "ds", "mm"]'));
         const ds = await f.adapter.create({ name: 'ds', model: 'test-ds', tag: 'ds', harness: 'codex' },
             { title: '0170-task feedback', cwd: f.project, asker: { permission: async () => 'reject', question: async () => '' } });
         f.h.live.set('feedback', ds);

@@ -44,6 +44,15 @@ test('role editing rejects invalid roles, aliases and scalar arity', () => {
     assert.throws(() => editRoleDefaults('/repo', config, 'review', []), /at least one/);
 });
 
+test('role editing can disable and restore automatic review without changing other assignments', () => {
+    const disabled = editRoleDefaults('/repo', config, 'review', ['']);
+    assert.equal(parseProjectConfig('/repo', disabled).roles.review, '');
+    assert.equal(onlyRoleChanges(config, disabled), true);
+    assert.deepEqual(parseProjectConfig('/repo', editRoleDefaults('/repo', disabled, 'review', ['b'])).roles,
+        parseProjectConfig('/repo', config).roles);
+    assert.throws(() => editRoleDefaults('/repo', config, 'implement', ['']), /unknown agent/);
+});
+
 test('role-only comparison permits batches but protects other config and unknown settings', () => {
     const first = editRoleDefaults('/repo', config, 'implement', ['b']);
     const second = editRoleDefaults('/repo', first, 'feedback', ['b', 'a']);

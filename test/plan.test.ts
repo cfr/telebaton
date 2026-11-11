@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { emptyNextMessage, nextReport, parseNext, summary } from '../src/plan.ts';
+import { emptyNextMessage, nextReport, parseNext, summary, taskRange } from '../src/plan.ts';
 import { chunk } from '../src/telegram.ts';
 
 const plan = `# plan
@@ -29,6 +29,16 @@ test('parses Next items with continuation lines', () => {
     assert.match(items[0].text, /Files: `a.cpp`$/);
     assert.equal(items[1].text, '- 0049-antlion-flick: flicks sand');
     assert.equal(summary(items[0]), '0048-antlion: a fixed ambusher');
+});
+
+test('task ranges are inclusive, ascending and require unique planned numbers', () => {
+    const items = parseNext(plan).reverse();
+    assert.deepEqual(taskRange(items, '0048..0049').map((item) => item.number), ['0048', '0049']);
+    assert.equal(taskRange(items, '0048..0048').length, 1);
+    assert.throws(() => taskRange(items, '0049..0048'), /ascending/);
+    assert.throws(() => taskRange(items, '0048..0050'), /0050.*found 0/);
+    assert.throws(() => taskRange([...items, items[0]], '0048..0049'), /0049.*found 2/);
+    assert.throws(() => taskRange(items, '48..49'), /inclusive task range/);
 });
 
 test('chunks long text at newlines', () => {

@@ -49,6 +49,7 @@ export interface GateRecord {
 export interface State {
     task?: PlanItem;
     taskComplete?: boolean;
+    taskQueue?: { ids: string[]; agent?: string; paused?: boolean; current?: string };
     archivedSessions?: { task: string; role: Role; ref: SessionRef; to: string; at: string }[];
     focus?: Role;
     sessions: Partial<Record<SessionRole, SessionRef>>;
