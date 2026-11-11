@@ -191,6 +191,24 @@ test('full feedback flow records actual repair commits, passes ledger/gate conte
     } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+for (const role of ['feedback', 'review'] as const) test(`${role} retries forward the missing closing fence error and accept the corrected report`, async () => {
+    const malformed = feedback([]).replace('\n```\nVERDICT:', '\nVERDICT:');
+    const f = setup(role === 'feedback' ? [malformed, feedback([])] : []);
+    if (role === 'review') f.setReviewReplies([malformed, feedback([])]);
+    try {
+        if (role === 'review') await f.h.startReview('sol');
+        else await f.h.afterImplementGate();
+        const reports = f.records.read('0170-task').reports.filter((r) => r.kind === role);
+        const error = reports[0].error!;
+        assert.match(error, /missing closing ``` fence.*VERDICT.*outside the code block/);
+        const agent = role === 'feedback' ? 'ds' : 'sol';
+        const correction = f.prompts.filter((p) => p.agent === agent)[1];
+        assert.ok(correction.text.includes(error));
+        assert.equal(reports[1].error, undefined);
+        assert.equal(f.store.state.taskComplete, true);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('malformed feedback retries once and stays pending across a restarted conductor', async () => {
     const f = setup(['Intro only', 'VERDICT: clean']);
     try {

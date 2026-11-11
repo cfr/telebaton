@@ -25,6 +25,7 @@ export const feedbackContract = `Return a readable report and exactly one fenced
 \`\`\`conductor-feedback
 {"verdict":"findings","findings":[{"key":"new1","category":"bug","summary":"Short description","location":"file:line","evidence":"Concrete input or failing check"}],"verifications":[]}
 \`\`\`
+Close the JSON block with \`\`\` on its own line; put the final VERDICT line outside the code block.
 Allowed categories: bug, test_gap, docs, process. For a clean check use verdict "clean" and findings [].
 Conductor assigns stable IDs. Link related coverage gaps with "relatedTo":"new1" (a key in this report)
 or an existing finding ID; report repeated findings with "duplicateOf":"existing-ID". Do not silently

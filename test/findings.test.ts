@@ -96,3 +96,22 @@ test('JSON and verdict must agree and duplicate report blocks are rejected', () 
     assert.throws(() => applyFeedback(l, report([finding()]).replace('VERDICT: findings', 'VERDICT: clean'), checker), /agree/);
     assert.throws(() => applyFeedback(l, report([]) + '\n' + report([]), checker), /exactly one/);
 });
+
+test('missing closing fences identify the repair for feedback and dispositions without accepting partial reports', () => {
+    const l = ledger();
+    const malformed = report([finding()]).replace('\n```\nVERDICT:', '\nVERDICT:');
+    assert.throws(() => applyFeedback(l, malformed, checker), /missing closing ``` fence.*VERDICT.*outside the code block/);
+    assert.deepEqual(l, ledger());
+    const ids = applyFeedback(l, report([finding()]), checker);
+    const before = structuredClone(l);
+    const unclosed = answers([{ id: ids[0], status: 'fixed', reason: 'Fixed' }]).replace(/\n```$/, '');
+    assert.throws(() => applyDispositions(l, unclosed, implementer, ids, ['def']), /missing closing ``` fence.*conductor-dispositions/);
+    assert.deepEqual(l, before);
+});
+
+test('block parsing accepts CRLF, rejects extra unclosed blocks, and preserves JSON parser errors', () => {
+    assert.deepEqual(applyFeedback(ledger(), report([]).replaceAll('\n', '\r\n'), checker), []);
+    assert.throws(() => applyFeedback(ledger(), report([]) + '\n```conductor-feedback\n{}', checker), /found 2 opening fences/);
+    assert.throws(() => applyFeedback(ledger(), '```conductor-feedback\n{"verdict": }\n```\nVERDICT: clean', checker),
+        /invalid JSON in conductor-feedback block: .+/);
+});

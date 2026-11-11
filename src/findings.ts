@@ -86,9 +86,20 @@ function choice<T extends string>(v: unknown, field: string, choices: readonly T
     return v as T;
 }
 function block(text: string, kind: string): Record<string, unknown> {
-    const blocks = [...text.matchAll(new RegExp('^```' + kind + '[ \\t]*\\r?\\n([\\s\\S]*?)^```[ \\t]*$', 'gm'))];
-    if (blocks.length !== 1) throw new Error(`include exactly one fenced ${kind} JSON block`);
-    return object(JSON.parse(blocks[0][1]));
+    const openings = [...text.matchAll(new RegExp('^```' + kind + '[ \\t]*\\r?\\n', 'gm'))];
+    if (openings.length !== 1) {
+        throw new Error(`include exactly one fenced ${kind} JSON block (found ${openings.length} opening fences)`);
+    }
+    const body = text.slice(openings[0].index! + openings[0][0].length);
+    const closing = /^```[ \t]*\r?$/m.exec(body);
+    if (!closing) {
+        throw new Error(`missing closing \`\`\` fence after the ${kind} JSON; put \`\`\` on its own line after the JSON` +
+            (kind === 'conductor-feedback' ? ', then put VERDICT: clean or VERDICT: findings outside the code block' : ''));
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(body.slice(0, closing.index)); }
+    catch (e) { throw new Error(`invalid JSON in ${kind} block: ${(e as Error).message}`); }
+    return object(parsed);
 }
 export function parseFeedback(text: string): Feedback {
     const b = block(text, 'conductor-feedback');
