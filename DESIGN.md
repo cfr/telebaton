@@ -139,6 +139,12 @@ including a manually requested gate, so a new task cannot replace state during a
 Any step can be followed by free text, which goes to the session that step talks to, so a
 review can turn into a discussion before `/fix`. Logs are exported throughout (see "Logs").
 
+Outgoing Telegram calls retry network failures and all API error responses up to eight times,
+waiting 1, 2, 5, 10, 20, 30, 60 and 60 seconds. Rate-limit `retry_after` values extend the relevant
+wait when necessary. The transformer handles raw unsuccessful API responses before grammY
+converts them to exceptions. Long polling retains its own retry handling; unrelated errors and
+cancelled requests are not retried.
+
 ## Commands
 
 - `/next [agent] [id]`: start the next PLAN item (or a given one) with an agent from the

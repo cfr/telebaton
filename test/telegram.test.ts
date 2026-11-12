@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HttpError, type Bot } from 'grammy';
-import { Chat, describeError, retryNetwork } from '../src/telegram.ts';
+import { Api, GrammyError, HttpError, type Bot } from 'grammy';
+import { Chat, describeError, retryTelegram } from '../src/telegram.ts';
 
 const dropped = () =>
     new HttpError(
@@ -17,7 +17,7 @@ test('network failures are retried, then given up on', async () => {
         }
         return { ok: true as const, result: true };
     };
-    const call = retryNetwork([0, 0]) as (...a: unknown[]) => Promise<unknown>;
+    const call = retryTelegram([0, 0]) as (...a: unknown[]) => Promise<unknown>;
     assert.deepEqual(await call(flaky, 'sendMessage', {}), { ok: true, result: true });
     assert.equal(calls, 3);
 
@@ -27,6 +27,72 @@ test('network failures are retried, then given up on', async () => {
 
     calls = 0;
     await assert.rejects(call(flaky, 'getUpdates', {}), HttpError);
+    assert.equal(calls, 1);
+});
+
+for (const code of [400, 403, 429, 500, 502, 503, 504]) {
+    test(`Telegram API error ${code} is retried with the same budget as network failures`, async () => {
+        let calls = 0;
+        const failure = { ok: false, error_code: code, description: 'Telegram request failed' };
+        const call = retryTelegram([0, 0]) as (...a: unknown[]) => Promise<unknown>;
+        const flaky = async () => ++calls < 3 ? failure : { ok: true, result: true };
+        assert.deepEqual(await call(flaky, 'sendDocument', {}), { ok: true, result: true });
+        assert.equal(calls, 3);
+        calls = 0;
+        await assert.rejects(call(async () => { calls++; return failure; }, 'sendDocument', {}),
+            (e: unknown) => e instanceof GrammyError && e.error_code === code);
+        assert.equal(calls, 3);
+        calls = 0;
+        await assert.rejects(call(async () => { calls++; return failure; }, 'getUpdates', {}), GrammyError);
+        assert.equal(calls, 1);
+    });
+}
+
+test('real grammY API calls retry raw gateway responses before returning or throwing', async () => {
+    let calls = 0;
+    let fail = false;
+    const api = new Api('123:test', { fetch: async () => new Response(JSON.stringify(
+        ++calls < 3 || fail
+            ? { ok: false, error_code: 504, description: 'Gateway Timeout' }
+            : { ok: true, result: { message_id: 42 } },
+    ), { headers: { 'content-type': 'application/json' } }) });
+    api.config.use(retryTelegram([0, 0]));
+    assert.equal((await api.sendDocument(123, 'existing-file-id')).message_id, 42);
+    assert.equal(calls, 3);
+    calls = 0;
+    fail = true;
+    await assert.rejects(api.sendDocument(123, 'existing-file-id'),
+        (e: unknown) => e instanceof GrammyError && e.error_code === 504 && e.method === 'sendDocument');
+    assert.equal(calls, 3);
+});
+
+test('rate limit retries wait at least Telegram retry_after seconds', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let calls = 0;
+    const call = retryTelegram([0]) as (...a: unknown[]) => Promise<unknown>;
+    const result = call(async () => ++calls === 1
+        ? { ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 2 } }
+        : { ok: true, result: true }, 'sendMessage', {});
+    await Promise.resolve();
+    t.mock.timers.tick(1999);
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    assert.deepEqual(await result, { ok: true, result: true });
+    assert.equal(calls, 2);
+});
+
+test('thrown Telegram errors retry but unrelated failures and aborted requests do not', async () => {
+    const error = new GrammyError('failed', { ok: false, error_code: 504, description: 'Gateway Timeout' }, 'sendMessage', {});
+    const call = retryTelegram([0]) as (...a: unknown[]) => Promise<unknown>;
+    let calls = 0;
+    await assert.rejects(call(async () => { calls++; throw error; }, 'sendMessage', {}), GrammyError);
+    assert.equal(calls, 2);
+    calls = 0;
+    await assert.rejects(call(async () => { calls++; throw new Error('programming error'); }, 'sendMessage', {}), /programming error/);
+    assert.equal(calls, 1);
+    calls = 0;
+    await assert.rejects(call(async () => { calls++; throw dropped(); }, 'sendMessage', {}, AbortSignal.abort()), HttpError);
     assert.equal(calls, 1);
 });
 

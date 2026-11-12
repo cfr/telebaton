@@ -7,17 +7,22 @@ const retryDelays = [1, 2, 5, 10, 20, 30, 60, 60].map((s) => s * 1000);
 
 // The nested fetch error's message carries the request URL, and with it the bot token.
 // getUpdates is left to the poller, which retries on its own.
-export function retryNetwork(delays = retryDelays): Transformer {
+export function retryTelegram(delays = retryDelays): Transformer {
     return async (prev, method, payload, signal) => {
         for (let attempt = 0; ; attempt++) {
             try {
-                return await prev(method, payload, signal);
+                const result = await prev(method, payload, signal);
+                if (!result.ok) throw new GrammyError(`Call to '${method}' failed!`, result, method, payload);
+                return result;
             } catch (e) {
-                if (!(e instanceof HttpError) || method === 'getUpdates' || attempt >= delays.length) {
+                if (!(e instanceof HttpError || e instanceof GrammyError) || method === 'getUpdates' ||
+                    signal?.aborted || attempt >= delays.length) {
                     throw e;
                 }
                 console.error(`telegram: ${method} failed (${describeError(e)}); retrying`);
-                await new Promise((r) => setTimeout(r, delays[attempt]));
+                const retryAfter = e instanceof GrammyError ? e.parameters.retry_after : undefined;
+                const wait = Math.max(delays[attempt], typeof retryAfter === 'number' && Number.isFinite(retryAfter) ? retryAfter * 1000 : 0);
+                await new Promise((r) => setTimeout(r, wait));
             }
         }
     };
@@ -94,7 +99,7 @@ export class Chat implements Messenger {
     constructor(token: string, userId: number) {
         this.userId = userId;
         this.bot = new Bot(token);
-        this.bot.api.config.use(retryNetwork());
+        this.bot.api.config.use(retryTelegram());
         this.bot.use(async (ctx, next) => {
             if (ctx.from?.id === this.userId) {
                 await next();

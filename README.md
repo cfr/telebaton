@@ -172,7 +172,9 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 Roles accepted by `/continue` are `implement`, `feedback`, `review`, and `plan`; `/summary` also
 accepts `chat`. Plain text goes to the focused task session. Reply to an agent's Telegram message
 to reach that session directly. Markdown replies are rendered as Telegram HTML, with plain-text
-fallback; network failures are retried for about three minutes.
+fallback. Telegram network and API errors get eight retries after the initial attempt, waiting
+1, 2, 5, 10, 20, 30, 60 and 60 seconds (about three minutes plus request time). Rate-limit
+responses honor Telegram's longer `retry_after` delay. Long polling uses its own retry handling.
 
 ## Planning, chat, and summaries
 
