@@ -268,13 +268,31 @@ test('unfinished tasks and changed queued PLAN items block queue progress withou
     try {
         await assert.rejects(f.h.nextTask(''), /finish the current task/);
         f.store.state.taskComplete = true;
-        await assert.rejects(f.h.nextTask(''), /0174-missing.*exactly once/);
+        await assert.rejects(f.h.nextTask(''), /0174-missing.*no longer exists/);
         assert.equal(f.store.state.task?.id, '0171-first');
         assert.equal(f.store.state.taskQueue?.paused, true);
         assert.deepEqual(f.store.state.taskQueue?.ids, ['0174-missing']);
         await f.h.nextTask('cancel');
         assert.equal(f.store.state.taskQueue, undefined);
         assert.equal(f.store.state.task?.id, '0171-first');
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('renumbered queued tasks pause with actionable diagnostics and retain the saved queue', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.store.state.taskQueue = { ids: ['0171-old-name', '0172-second'] };
+    try {
+        await assert.rejects(f.h.nextTask(''), (e: Error) => {
+            assert.match(e.message, /Queued task: 0171-old-name/);
+            assert.match(e.message, /Current entry for 0171: 0171-first/);
+            assert.match(e.message, /confirm a replacement range/);
+            return true;
+        });
+        assert.equal(f.store.state.taskQueue?.paused, true);
+        assert.deepEqual(new Store(f.local.stateFile).state.taskQueue?.ids, ['0171-old-name', '0172-second']);
+        assert.equal(f.prompts.length, 0);
+        assert.equal(f.store.state.task?.id, '0170-task');
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 

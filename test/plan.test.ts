@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { emptyNextMessage, nextReport, parseNext, summary, taskRange } from '../src/plan.ts';
+import { emptyNextMessage, nextReport, parseNext, queuedTask, summary, taskRange } from '../src/plan.ts';
 import { chunk } from '../src/telegram.ts';
 
 const plan = `# plan
@@ -39,6 +39,24 @@ test('task ranges are inclusive, ascending and require unique planned numbers', 
     assert.throws(() => taskRange(items, '0048..0050'), /0050.*found 0/);
     assert.throws(() => taskRange([...items, items[0]], '0048..0049'), /0049.*found 2/);
     assert.throws(() => taskRange(items, '48..49'), /inclusive task range/);
+});
+
+test('queued task errors explain renumbering, removal, duplicate IDs and recovery', () => {
+    const items = parseNext(plan);
+    assert.equal(queuedTask(items, '0048-antlion'), items[0]);
+    const revised = parseNext(plan.replace('0048-antlion:', '0048-new-format:').replace('0049-antlion-flick:', '0051-antlion:'));
+    assert.throws(() => queuedTask(revised, '0048-antlion'), (e: Error) => {
+        assert.match(e.message, /PLAN.md Next changed/);
+        assert.match(e.message, /Queued task: 0048-antlion \(no longer exists\)/);
+        assert.match(e.message, /Current entry for 0048: 0048-new-format/);
+        assert.match(e.message, /same task name now appears as: 0051-antlion/);
+        assert.match(e.message, /check the revised plan and endpoint/);
+        assert.match(e.message, /confirm a replacement range/);
+        assert.match(e.message, /next alone retries the saved IDs/);
+        return true;
+    });
+    assert.throws(() => queuedTask([], '0048-antlion'), /Current entry for 0048: \(none\)/);
+    assert.throws(() => queuedTask([...items, items[0]], '0048-antlion'), /appears 2 times/);
 });
 
 test('chunks long text at newlines', () => {

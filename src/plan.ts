@@ -19,6 +19,22 @@ export function taskRange(items: PlanItem[], range: string): PlanItem[] {
     return selected;
 }
 
+export function queuedTask(items: PlanItem[], id: string): PlanItem {
+    const matches = items.filter((item) => item.id === id);
+    if (matches.length === 1) return matches[0];
+    const number = idNumber(id);
+    const current = items.filter((item) => item.number === number);
+    const moved = items.filter((item) => item.id !== id && item.id.slice(5) === id.slice(5));
+    throw new Error([
+        'task queue paused: PLAN.md Next changed since the range was confirmed.',
+        `Queued task: ${id} (${matches.length ? `appears ${matches.length} times` : 'no longer exists'}).`,
+        `Current entry for ${number}: ${current.map((item) => item.id).join(', ') || '(none)'}.`,
+        ...(moved.length ? [`The same task name now appears as: ${moved.map((item) => item.id).join(', ')}.`] : []),
+        'Use /todo to check the revised plan and endpoint, then /next [agent] NNNN..NNNN to confirm a replacement range, ' +
+            'or /next cancel to clear the queue. /next alone retries the saved IDs.',
+    ].join('\n'));
+}
+
 function nextSection(plan: string): string[] {
     const lines = plan.split('\n');
     const start = lines.findIndex((l) => /^## Next\s*$/.test(l));

@@ -119,6 +119,9 @@ configured feedback/review flow before the next starts. `/next dsf 0272..0280` u
 for the whole range; otherwise each task uses the current default. Task text is reread before
 each start. Findings requiring `/fix`, incomplete reports, failed turns and failed gates hold the
 queue until the current task is resolved. `/status` shows the remaining queue.
+If PLAN.md renames or renumbers a queued task, the error shows the saved ID, the current entry
+with that number, and any matching task name at another number. Check `/todo` and confirm a new
+range to replace the queue; `/next` alone keeps the original saved IDs.
 
 `/stop` pauses the queue as well as interrupting active work. Finish the current task, then use
 `/next` to resume the remaining tasks without another confirmation. The queue survives restarts

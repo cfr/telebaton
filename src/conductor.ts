@@ -21,7 +21,7 @@ import { FeedbackTracker, feedbackContract, commitGuidance } from './feedback.ts
 import { escapeHtml } from './format.ts';
 import { Jobs, logTail, readLog } from './jobs.ts';
 import { renderMarkdown, usageMetadata } from './logs/markdown.ts';
-import { emptyNextMessage, idNumber, nextReport, parseNext, summary, taskRange, type PlanItem } from './plan.ts';
+import { emptyNextMessage, idNumber, nextReport, parseNext, queuedTask, summary, taskRange, type PlanItem } from './plan.ts';
 import { git, tail } from './proc.ts';
 import * as repo from './repo.ts';
 import type { SessionRef, State, Store } from './state.ts';
@@ -514,18 +514,17 @@ export class Conductor {
                     return;
                 }
                 const items = parseNext(readFileSync(join(this.project.root, 'PLAN.md'), 'utf8'));
-                const matches = items.filter((item) => item.id === queue.ids[0]);
-                if (matches.length !== 1) throw new Error(`queued task ${queue.ids[0]} must appear exactly once in PLAN.md Next`);
+                const item = queuedTask(items, queue.ids[0]);
                 const agent = queue.agent ?? this.project.roles.implement;
                 this.agent(agent);
                 this.claim('implement');
                 try {
-                    await this.prepareTask(matches[0], agent);
+                    await this.prepareTask(item, agent);
                     queue.ids.shift();
-                    queue.current = matches[0].id;
+                    queue.current = item.id;
                     this.store.save();
                 } finally { this.busy = null; }
-                await this.turn('implement', fill(this.project.prompts.implement, this.vars()), `implementing ${matches[0].id} (queued)`);
+                await this.turn('implement', fill(this.project.prompts.implement, this.vars()), `implementing ${item.id} (queued)`);
             }
         } catch (e) {
             if (this.state.taskQueue) { this.state.taskQueue.paused = true; this.store.save(); }

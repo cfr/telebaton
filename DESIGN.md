@@ -120,6 +120,10 @@ starting it. Only task completion (clean final review, gated review repair, or c
 when automatic review is disabled) advances the queue. Findings, incomplete reports, failed
 turns, pending work and failed gates hold it on the current task. Queue advancement is serialized
 so nested completion callbacks cannot start the same item twice.
+Missing or duplicate queued IDs pause without replacing the saved queue. Diagnostics show the
+queued ID, current entries at its number, any matching task name at another number, and commands
+to inspect the revised plan, confirm a replacement range, or cancel. A plain `/next` retains the
+original IDs; renumbered tasks require a newly confirmed range.
 
 `/stop` pauses the queue before interrupting work; `/next` resumes it once the current task is
 complete. Restart preserves the queue paused and does not start agents automatically. `/next
