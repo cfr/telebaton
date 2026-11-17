@@ -1,5 +1,5 @@
 import type { Role, ProjectConfig } from './config.ts';
-import { FindingStore, findingSummary, type Receipt, type Source } from './findings.ts';
+import { FindingStore, findingSummary, verificationChecklist, type Receipt, type Source } from './findings.ts';
 import type { Store } from './state.ts';
 import * as repo from './repo.ts';
 
@@ -17,21 +17,25 @@ export const validationGuidance =
     'with it, or explain why this cannot be demonstrated. When behavior crosses components, test through ' +
     'the real caller/entry path, not only an isolated helper. For bounds changes use maximum supported ' +
     'lengths/counts and realistic combinations. Check repair regressions and invariants changed by a fix. ' +
-    'Conductor owns the full verification gate after commits. Use focused tests while implementing or ' +
+    'Telebaton owns the full verification gate after commits. Use focused tests while implementing or ' +
     'reviewing; do not rerun a green full gate on an unchanged tree. A stale, failed, or missing gate is ' +
     'not evidence of success. Do not rewrite history to fix old commit messages; record the limitation.';
 
-export const feedbackContract = `Return a readable report and exactly one fenced conductor-feedback JSON block:
-\`\`\`conductor-feedback
+export const feedbackContract = `Return a readable report and exactly one fenced telebaton-feedback JSON block:
+\`\`\`telebaton-feedback
 {"verdict":"findings","findings":[{"key":"new1","category":"bug","summary":"Short description","location":"file:line","evidence":"Concrete input or failing check"}],"verifications":[]}
 \`\`\`
 Close the JSON block with \`\`\` on its own line; put the final VERDICT line outside the code block.
 Allowed categories: bug, test_gap, docs, process. For a clean check use verdict "clean" and findings [].
-Conductor assigns stable IDs. Link related coverage gaps with "relatedTo":"new1" (a key in this report)
+Telebaton assigns stable IDs. Link related coverage gaps with "relatedTo":"new1" (a key in this report)
 or an existing finding ID; report repeated findings with "duplicateOf":"existing-ID". Do not silently
 merge similar findings. For previous fixes use verifications [{"id":"existing-ID","status":"verified",
 "reason":"Independent evidence at this SHA"}]. Other statuses: "open" for a still-broken/rejected fix,
 "accepted_rejection" when the rejection or deferral is justified. Verify every pending claimed fix.
+Do not put duplicate IDs in verifications: assess the original finding ID listed in the verification
+checklist instead. Follow duplicateOf chains to the original; relatedTo findings remain separate
+and each pending related fix requires its own verification entry. A duplicate needs no separate
+verified, open or accepted_rejection entry. Never transfer evidence or mark fixes verified implicitly.
 Use verdict "findings" for new or still-open issues; a duplicate-only report can be clean if the
 original is resolved. An overall clean verdict alone does not verify a finding. Do not repeat rejected findings without new
 evidence; honor the recorded reason. Investigate until an issue is demonstrated, then report it without
@@ -42,12 +46,12 @@ export function dispositionContract(ids: readonly string[]): string {
         id, status: 'fixed', reason: 'What changed and regression evidence',
     })) }, null, 2);
     return `Answer every requested finding ID exactly once in a readable reply plus:
-\`\`\`conductor-dispositions
+\`\`\`telebaton-dispositions
 ${example}
 \`\`\`
 Keep these exact IDs. Choose each actual status and replace the example reasons with evidence.
 Statuses: fixed, rejected, deferred. Explain every disposition. A fixed claim requires a new commit.
-Conductor records the actual commits made during this repair; do not invent commit hashes. Do not amend
+Telebaton records the actual commits made during this repair; do not invent commit hashes. Do not amend
 or rebase earlier commits. Keep related bugs and test gaps separately identified.`;
 }
 
@@ -80,8 +84,8 @@ export class FeedbackTracker {
               `${gate.sha === sha && !dirty && JSON.stringify(gate.commands) === JSON.stringify(this.project.gate.map((s) => s.cmd))
                   ? 'Same SHA, gate commands, and clean worktree.'
                   : 'SHA, worktree, or gate commands differ/are unknown; do not assume it covers this tree.'}`
-            : 'No conductor gate result recorded.';
-        const extra = [text, '\nValidation and verification ownership:', validationGuidance, `Conductor gate: ${gateText}`];
+            : 'No Telebaton gate result recorded.';
+        const extra = [text, '\nValidation and verification ownership:', validationGuidance, `Telebaton gate: ${gateText}`];
         const skipped = state.feedbackSkips?.filter((s) => s.task === state.task?.id);
         if (skipped?.length) extra.push('Feedback steps skipped by user request (not clean checks):\n' +
             skipped.map((s) => `round ${s.round}: ${s.agent} at ${s.at}`).join('\n'));
@@ -93,6 +97,9 @@ export class FeedbackTracker {
         }
         if (role === 'feedback' || role === 'review') {
             extra.push(`Current SHA: ${sha}`, `Previous feedback findings and dispositions:\n${this.summary()}`);
+            if (role === 'feedback' || !state.sessions.review?.fixingFindings) {
+                extra.push(verificationChecklist(this.records.read(this.task)));
+            }
             state.sessions[role]!.reportSha = sha;
             state.sessions[role]!.trackedFindings = true;
             this.store.save();

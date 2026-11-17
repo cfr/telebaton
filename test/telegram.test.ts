@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Api, GrammyError, HttpError, type Bot } from 'grammy';
 import { Chat, describeError, retryTelegram } from '../src/telegram.ts';
 
@@ -36,10 +39,10 @@ for (const code of [400, 403, 429, 500, 502, 503, 504]) {
         const failure = { ok: false, error_code: code, description: 'Telegram request failed' };
         const call = retryTelegram([0, 0]) as (...a: unknown[]) => Promise<unknown>;
         const flaky = async () => ++calls < 3 ? failure : { ok: true, result: true };
-        assert.deepEqual(await call(flaky, 'sendDocument', {}), { ok: true, result: true });
+        assert.deepEqual(await call(flaky, 'sendMessage', {}), { ok: true, result: true });
         assert.equal(calls, 3);
         calls = 0;
-        await assert.rejects(call(async () => { calls++; return failure; }, 'sendDocument', {}),
+        await assert.rejects(call(async () => { calls++; return failure; }, 'sendMessage', {}),
             (e: unknown) => e instanceof GrammyError && e.error_code === code);
         assert.equal(calls, 3);
         calls = 0;
@@ -48,22 +51,86 @@ for (const code of [400, 403, 429, 500, 502, 503, 504]) {
     });
 }
 
-test('real grammY API calls retry raw gateway responses before returning or throwing', async () => {
+test('real grammY document calls do not retry ambiguous gateway responses', async () => {
     let calls = 0;
-    let fail = false;
-    const api = new Api('123:test', { fetch: async () => new Response(JSON.stringify(
-        ++calls < 3 || fail
+    let fail = true;
+    const api = new Api('123:test', { fetch: async () => {
+        calls++;
+        return new Response(JSON.stringify(fail
             ? { ok: false, error_code: 504, description: 'Gateway Timeout' }
             : { ok: true, result: { message_id: 42 } },
-    ), { headers: { 'content-type': 'application/json' } }) });
+        ), { headers: { 'content-type': 'application/json' } });
+    } });
     api.config.use(retryTelegram([0, 0]));
-    assert.equal((await api.sendDocument(123, 'existing-file-id')).message_id, 42);
-    assert.equal(calls, 3);
-    calls = 0;
-    fail = true;
     await assert.rejects(api.sendDocument(123, 'existing-file-id'),
         (e: unknown) => e instanceof GrammyError && e.error_code === 504 && e.method === 'sendDocument');
+    assert.equal(calls, 1);
+    fail = false;
+    assert.equal((await api.sendDocument(123, 'existing-file-id')).message_id, 42);
+    assert.equal(calls, 2);
+});
+
+test('document network and API failures are not resent, except explicit rate-limit rejections', async () => {
+    const call = retryTelegram([0, 0]) as (...a: unknown[]) => Promise<unknown>;
+    for (const code of [400, 403, 500, 502, 503, 504]) {
+        let calls = 0;
+        await assert.rejects(call(async () => {
+            calls++;
+            return { ok: false, error_code: code, description: 'failed' };
+        }, 'sendDocument', {}), GrammyError);
+        assert.equal(calls, 1);
+    }
+    let calls = 0;
+    await assert.rejects(call(async () => { calls++; throw dropped(); }, 'sendDocument', {}), HttpError);
+    assert.equal(calls, 1);
+    calls = 0;
+    const result = await call(async () => ++calls < 3
+        ? { ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 0 } }
+        : { ok: true, result: true }, 'sendDocument', {});
+    assert.deepEqual(result, { ok: true, result: true });
     assert.equal(calls, 3);
+});
+
+test('failed attachments are archived and return without waiting for the delivery warning', { timeout: 2000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'telegram-attachment-'));
+    const chat = new Chat('123:test', 123, dir);
+    const warnings: { text: string; route?: string }[] = [];
+    let finishWarning: (() => void) | undefined;
+    chat.send = async (text, route) => {
+        warnings.push({ text, route });
+        await new Promise<void>((resolve) => { finishWarning = resolve; });
+    };
+    Object.assign(chat, { bot: { api: { async sendDocument() { throw dropped(); } } } });
+    try {
+        await chat.sendFile('task.diff', 'diff contents\n', 'Changes', 'implement');
+        const files = readdirSync(dir);
+        assert.equal(files.length, 1);
+        assert.match(files[0], /task.diff$/);
+        assert.equal(readFileSync(join(dir, files[0]), 'utf8'), 'diff contents\n');
+        assert.equal(warnings[0].route, 'implement');
+        assert.match(warnings[0].text, /may already be in this chat/);
+        assert.ok(warnings[0].text.includes(join(dir, files[0])));
+        assert.doesNotMatch(warnings[0].text, /SECRET/);
+    } finally { finishWarning?.(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const markdown of [false, true]) test(`long ${markdown ? 'Markdown' : 'plain'} messages preserve their ending without attachments`, async () => {
+    const chat = new Chat('123:test', 123);
+    const messages: string[] = [];
+    Object.assign(chat, { bot: { api: {
+        async sendMessage(_user: number, text: string) { messages.push(text); return { message_id: messages.length }; },
+        async sendDocument() { throw new Error('automatic attachments are forbidden'); },
+    } } });
+    const text = 'Report beginning\n' + 'Long report\n'.repeat(2000) + '\nVERDICT: findings';
+    if (markdown) await chat.sendMarkdown('Sol', text, 'feedback');
+    else await chat.send(text, 'feedback');
+    assert.equal(messages.length, 3);
+    assert.match(messages[0], /Report beginning/);
+    assert.match(messages.at(-1)!, /middle omitted/);
+    assert.match(messages.at(-1)!, /VERDICT: findings/);
+    assert.ok(messages.every((m) => m.length <= 4000));
+    const routes = (chat as unknown as { routes: Map<number, string> }).routes;
+    assert.deepEqual([...routes.values()], ['feedback', 'feedback', 'feedback']);
 });
 
 test('rate limit retries wait at least Telegram retry_after seconds', async (t) => {

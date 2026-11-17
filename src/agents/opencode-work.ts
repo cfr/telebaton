@@ -52,12 +52,12 @@ export class OpencodeWork {
         const failures = [...new Set(failed.map((p) => p.id!))].map((id) => ({ id,
             idle: this.state.sessions[id].failedAt!, failureMessageId: this.state.sessions[id].failure?.messageId }));
         if (failures.length) {
-            text += '\n\nConductor observed failed child agents (these are failures, not completed reports):\n' +
+            text += '\n\nTelebaton observed failed child agents (these are failures, not completed reports):\n' +
                 failed.map((p) => `- ${p.id}: ${p.description}`).join('\n') +
                 '\nHandle their unfinished work yourself or explicitly retry it when possible. ' +
                 'Do not assume the children succeeded. If the task is already committed, inspect the ' +
                 'existing work and validation before deciding whether more changes are needed. ' +
-                'Briefly report how you handled these failures. Conductor will acknowledge them only ' +
+                'Briefly report how you handled these failures. Telebaton will acknowledge them only ' +
                 'after this parent turn finishes successfully; running work still blocks advancement.';
         }
         return { text, failures };

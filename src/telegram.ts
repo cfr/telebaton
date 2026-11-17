@@ -1,4 +1,7 @@
 import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile, type Transformer } from 'grammy';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { escapeHtml, markdownToHtml } from './format.ts';
 
 const maxMessage = 4000;
@@ -16,7 +19,8 @@ export function retryTelegram(delays = retryDelays): Transformer {
                 return result;
             } catch (e) {
                 if (!(e instanceof HttpError || e instanceof GrammyError) || method === 'getUpdates' ||
-                    signal?.aborted || attempt >= delays.length) {
+                    signal?.aborted || attempt >= delays.length ||
+                    (method === 'sendDocument' && !(e instanceof GrammyError && e.error_code === 429))) {
                     throw e;
                 }
                 console.error(`telegram: ${method} failed (${describeError(e)}); retrying`);
@@ -95,10 +99,12 @@ export class Chat implements Messenger {
     private routes = new Map<number, string>();
     onText: TextHandler = async () => {};
     private userId: number;
+    private attachmentDir: string;
 
-    constructor(token: string, userId: number) {
+    constructor(token: string, userId: number, attachmentDir = resolve('state', 'attachments')) {
         this.userId = userId;
-        this.bot = new Bot(token);
+        this.attachmentDir = attachmentDir;
+        this.bot = new Bot(token, { client: { timeoutSeconds: 60 } });
         this.bot.api.config.use(retryTelegram());
         this.bot.use(async (ctx, next) => {
             if (ctx.from?.id === this.userId) {
@@ -163,10 +169,9 @@ export class Chat implements Messenger {
 
     async send(text: string, route?: string): Promise<void> {
         let parts = chunk(text);
-        let attachment: string | undefined;
         if (parts.length > maxChunks) {
-            attachment = text;
-            parts = [chunk(text, maxMessage - 200)[0] + '\n\n… (full text attached)'];
+            parts = [...parts.slice(0, maxChunks - 1),
+                '… (middle omitted; /log lists full session logs)\n\n' + chunk(text, maxMessage - 200).at(-1)!];
         }
         for (const part of parts) {
             const msg = await this.bot.api.sendMessage(this.userId, part, {
@@ -175,9 +180,6 @@ export class Chat implements Messenger {
             if (route) {
                 this.routes.set(msg.message_id, route);
             }
-        }
-        if (attachment !== undefined) {
-            await this.sendFile('message.md', attachment, undefined, route);
         }
     }
 
@@ -238,10 +240,10 @@ export class Chat implements Messenger {
 
     async sendMarkdown(prefix: string, markdown: string, route?: string): Promise<void> {
         const head = `<b>${escapeHtml(prefix)}</b>\n`;
-        let chunks = markdownToHtml(markdown, maxMessage - head.length);
-        const attach = chunks.length > maxChunks;
-        if (attach) {
-            chunks = [chunks[0] + '\n\n<i>… (full text attached)</i>'];
+        let chunks = markdownToHtml(markdown, maxMessage - head.length - 200);
+        if (chunks.length > maxChunks) {
+            chunks = [...chunks.slice(0, maxChunks - 1),
+                '<i>… middle omitted; /log lists full session logs.</i>\n\n' + chunks.at(-1)!];
         }
         for (const [i, html] of chunks.entries()) {
             const text = i === 0 ? head + html : html;
@@ -265,9 +267,6 @@ export class Chat implements Messenger {
                 this.routes.set(id, route);
             }
         }
-        if (attach) {
-            await this.sendFile('message.md', markdown, undefined, route);
-        }
     }
 
     async sendFile(name: string, content: string, caption?: string, route?: string) {
@@ -276,13 +275,29 @@ export class Chat implements Messenger {
             await this.send([caption, note].filter(Boolean).join('\n'), route);
             return;
         }
-        const msg = await this.bot.api.sendDocument(
-            this.userId,
-            new InputFile(Buffer.from(content, 'utf8'), name),
-            caption ? { caption: caption.slice(0, 1000) } : {},
-        );
-        if (route) {
-            this.routes.set(msg.message_id, route);
+        try {
+            const msg = await this.bot.api.sendDocument(
+                this.userId,
+                new InputFile(Buffer.from(content, 'utf8'), name),
+                caption ? { caption: caption.slice(0, 1000) } : {},
+            );
+            if (route) this.routes.set(msg.message_id, route);
+        } catch (e) {
+            if (!(e instanceof HttpError || e instanceof GrammyError)) throw e;
+            let saved: string;
+            try {
+                mkdirSync(this.attachmentDir, { recursive: true });
+                const file = join(this.attachmentDir, `${randomUUID()}-${basename(name)}`);
+                writeFileSync(file, content, 'utf8');
+                saved = `Saved locally: ${file}`;
+            } catch (saveError) {
+                saved = `Local attachment backup failed: ${describeError(saveError)}`;
+            }
+            const warning = `Attachment delivery unconfirmed: ${name}. ${describeError(e)}\n` +
+                `It may already be in this chat. ${saved}\nContinuing without confirmed attachment delivery.`;
+            console.error(`telegram: ${warning}`);
+            // Reporting a failed upload must not put the task behind another network retry loop.
+            void this.send(warning, route).catch((error: unknown) => console.error(`telegram: delivery warning failed: ${describeError(error)}`));
         }
     }
 

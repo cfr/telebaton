@@ -18,6 +18,7 @@ import {
     type SessionRole,
 } from './config.ts';
 import { FeedbackTracker, feedbackContract, commitGuidance } from './feedback.ts';
+import { hasFeedbackFence } from './findings.ts';
 import { escapeHtml } from './format.ts';
 import { Jobs, logTail, readLog } from './jobs.ts';
 import { renderMarkdown, usageMetadata } from './logs/markdown.ts';
@@ -55,6 +56,7 @@ const help = `/next [agent] [id] - start the next PLAN item (or a given one)
 /status - current task, step, sessions, last gate
 /stop [chat] - interrupt the running agent (or the chat)
 /log - export session logs now
+/diff [hash] - request the current task diff, or a single commit patch
 Plain text goes to the current session; reply to an agent message to reach that session.`;
 
 function slug(text: string): string {
@@ -67,7 +69,7 @@ function slug(text: string): string {
     );
 }
 
-export class Conductor {
+export class Telebaton {
     private project: ProjectConfig;
     private adapters: Record<AgentConfig['harness'], Adapter>;
     private live = new Map<SessionRole, AgentSession>();
@@ -125,6 +127,7 @@ export class Conductor {
         chat.command('status', async () => chat.sendHtml(this.status()));
         chat.command('stop', (a) => this.stop(a));
         chat.command('log', () => this.exportAll());
+        chat.command('diff', (a) => this.diffCommand(a));
         chat.onText = (text, route) => this.text(text, route as SessionRole | undefined);
         for (const adapter of Object.values(this.adapters)) {
             adapter.onUnsolicited = (id, ev) => this.detach(this.unsolicited(id, ev));
@@ -180,11 +183,7 @@ export class Conductor {
             const r = await this.jobs.run(c.name, cmd, this.project.root);
             const secs = ((Date.now() - started) / 1000).toFixed(0);
             const outcome = r.code === 0 ? 'done' : `failed (exit ${r.code})`;
-            await this.chat.sendLog(`/${c.name}: ${outcome} in ${secs} s`, logTail(r.log, 20));
-            const full = readFileSync(r.log, 'utf8');
-            if (full.split('\n').length > 21) {
-                await this.chat.sendFile(`${c.name}.log`, full);
-            }
+            await this.chat.sendLog(`/${c.name}: ${outcome} in ${secs} s; log: ${r.log}`, logTail(r.log, 20));
         } finally {
             this.busy = null;
         }
@@ -992,7 +991,7 @@ export class Conductor {
                 nextReport(readFileSync(join(root, 'PLAN.md'), 'utf8')),
             ].join('\n'),
         );
-        await this.chat.sendFile('PLAN.diff', await repo.diff(root, before), 'PLAN.md changes');
+        await this.chat.send('Use /diff <hash> to request a planning commit patch.');
         const commits = await repo.commitsSince(root, before);
         if ((await this.chat.ask('Keep the planning commit?', ['keep', 'undo commit'], false)) !== 'undo commit') {
             const kept = this.state.sessions.plan;
@@ -1344,7 +1343,7 @@ export class Conductor {
                     this.store.save();
                 }
             } else if (!this.state.workConflict && r.outcome === 'succeeded' && gateFrom === undefined &&
-                (ref.expectReport || r.text.includes('```conductor-feedback'))) {
+                (ref.expectReport || hasFeedbackFence(r.text))) {
                 await this.recordReviewReport(r.text);
                 return;
             }
@@ -1668,7 +1667,7 @@ export class Conductor {
         this.store.save();
         const task = this.state.task;
         if (!g.ok) {
-            await this.chat.sendFile('gate.log', g.log, `gate failed at ${g.failedStep} (${g.seconds.toFixed(0)} s)`);
+            await this.chat.sendLog(`gate failed at ${g.failedStep} (${g.seconds.toFixed(0)} s); log: ${gateFile}`, tail(g.log, 60));
             if (attempt === 0) {
                 const text = fill(this.project.prompts.gateFailed, this.vars({ step: g.failedStep ?? '', output: tail(g.log, 60) }));
                 await this.turn(role, text, `fixing the gate failure`, 1);
@@ -1696,7 +1695,6 @@ export class Conductor {
                 ...(dirty ? ['', `uncommitted:\n${dirty}`] : []),
             ].join('\n'),
         );
-        await this.chat.sendFile(`${task?.id ?? 'task'}-${role}.diff`, await repo.diff(root, from));
         if (role === 'implement') {
             this.state.feedbackFindingIds = undefined;
             this.state.feedbackFixBase = undefined;
@@ -1762,6 +1760,25 @@ export class Conductor {
             ref.logFile = file;
             this.store.save();
         }
+    }
+
+    private async diffCommand(args: string) {
+        const hash = args.trim();
+        if (hash && !/^[a-f0-9]{4,64}$/i.test(hash)) throw new Error('usage: /diff [commit hash]');
+        const root = this.project.root;
+        const task = this.state.task;
+        const ref = task ? this.state.sessions.implement ?? this.state.sessions.review : undefined;
+        const head = await repo.head(root);
+        if (!hash && ref) {
+            const patch = await git(root, 'diff', '--no-ext-diff', '--no-textconv', ref.startSha, head, '--');
+            await this.chat.sendFile(`${task!.id}.diff`, patch, `${task!.id}: ${ref.startSha.slice(0, 7)}..${head.slice(0, 7)}`);
+            return;
+        }
+        let commit: string;
+        try { commit = (await git(root, 'rev-parse', '--verify', '--end-of-options', `${hash || head}^{commit}`)).trim(); }
+        catch { throw new Error(`unknown commit ${hash || head}`); }
+        const patch = await git(root, 'show', '--format=', '--patch', '--no-ext-diff', '--no-textconv', commit, '--');
+        await this.chat.sendFile(`${commit.slice(0, 12)}.diff`, patch, `Commit ${commit.slice(0, 7)}`);
     }
 
     private async exportAll() {
@@ -1916,7 +1933,7 @@ export class Conductor {
             if (readFileSync(file, 'utf8') !== original) throw new Error(`${configName} changed; retry ${command}`);
             writeFileSync(file, proposal);
             this.reload();
-            await this.chat.sendFile(`${configName.slice(0, -5)}.diff`, await repo.fileDiff(root, configName), this.roleList());
+            await this.chat.sendLog(this.roleList(), await repo.fileDiff(root, configName));
             const choice = await this.chat.ask('Keep the role changes?', ['commit', 'keep', 'discard'], false);
             if (readFileSync(file, 'utf8') !== proposal) throw new Error(`${configName} changed during confirmation; left it untouched`);
             if (choice === 'discard') writeFileSync(file, original);

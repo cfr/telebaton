@@ -193,7 +193,7 @@ class CodexSession implements AgentSession {
         if (this.saved.result && (this.saved.since ?? 0) >= since - 1000) {
             return { running: false, outcome: this.saved.result.outcome, error: this.saved.result.error };
         }
-        return { running: false, outcome: 'interrupted', error: 'Conductor restarted during the Codex turn; use /continue.' };
+        return { running: false, outcome: 'interrupted', error: 'Telebaton restarted during the Codex turn; use /continue.' };
     }
     async pendingWork() {
         return this.saved.process && groupAlive(this.saved.process.pid)

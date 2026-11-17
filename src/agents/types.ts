@@ -65,7 +65,7 @@ export interface AgentSession {
     lastReply(): Promise<string>;
     interrupt(): Promise<void>;
     transcript(): Promise<Transcript | undefined>;
-    // For a turn begun at `since` (ms) whose end the conductor missed, e.g. across a restart.
+    // For a turn begun at `since` (ms) whose end Telebaton missed, e.g. across a restart.
     turnState(since: number): Promise<TurnState>;
     // Includes child sessions and completion notifications the parent has not processed.
     pendingWork(): Promise<PendingWork[]>;

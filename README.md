@@ -43,8 +43,11 @@ and commands for your project.
 
 Telebaton was previously named Conductor. Projects use lowercase `telebaton.toml`; legacy
 `CONDUCTOR.toml` remains supported as a fallback. When both exist, `telebaton.toml` takes precedence.
-The local-config environment variable `CONDUCTOR_CONFIG` and `conductor-feedback` /
-`conductor-dispositions` report formats keep their existing names for session compatibility.
+Use `TELEBATON_CONFIG` for the local-config override and `telebaton-feedback` /
+`telebaton-dispositions` for report fences. The legacy `CONDUCTOR_CONFIG` override is accepted
+when the new variable is unset. Old `conductor-feedback` and `conductor-dispositions` fences are
+also accepted so existing sessions and logs keep working; each reply must still contain exactly
+one report block across both naming schemes.
 
 The two configuration files serve different purposes:
 
@@ -95,7 +98,7 @@ changes also require a restart.
 npm start
 ```
 
-Set `CONDUCTOR_CONFIG` to use a different local config file. Console messages carry local
+Set `TELEBATON_CONFIG` to use a different local config file. Console messages carry local
 timestamps. Ctrl-C stops Telebaton and its managed project commands; a second Ctrl-C or a
 15-second shutdown timeout forces exit.
 
@@ -137,7 +140,9 @@ implementer's repairs on its second pass; a clean first Sol pass skips the redun
 
 Agents follow the project's instructions for commits and for moving completed tasks from
 `PLAN.md` to `CHANGELOG.md`. Telebaton does not edit those files. Gate output, commit summaries,
-and diffs are posted to Telegram; long outputs are attached as files. Prompts are shown as
+and diff statistics are posted to Telegram as text. Attachments are sent only on an explicit
+`/diff` request. Long messages show their beginning and ending, preserving the final verdict;
+`/log` exports the full session locally and lists its path. Prompts are shown as
 collapsed quotes so you can inspect what the agent received.
 Implementation, review and planning prompts instruct agents to write commit messages to a file
 with real line breaks, validate the co-author trailer, and use `git commit -F`. This avoids
@@ -170,14 +175,27 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 | `/swap <agent1> <agent2>` | Exchange two uniquely assigned role defaults. |
 | `/agent <alias>` | Hand off the current task's focused role, then wait for `/continue`. |
 | `/log` | Export session logs and the current finding summary. |
+| `/diff [hash]` | Send the current task's committed diff, or a single commit's patch. |
 | `/help` | Show commands, including configured project commands. |
 
 Roles accepted by `/continue` are `implement`, `feedback`, `review`, and `plan`; `/summary` also
 accepts `chat`. Plain text goes to the focused task session. Reply to an agent's Telegram message
 to reach that session directly. Markdown replies are rendered as Telegram HTML, with plain-text
-fallback. Telegram network and API errors get eight retries after the initial attempt, waiting
+fallback. Telegram message network and API errors get eight retries after the initial attempt, waiting
 1, 2, 5, 10, 20, 30, 60 and 60 seconds (about three minutes plus request time). Rate-limit
 responses honor Telegram's longer `retry_after` delay. Long polling uses its own retry handling.
+Requests time out after 60 seconds. Document uploads are not resent after network or API errors
+because the attachment may already have arrived; explicit 429 rate-limit rejections still retry.
+An unconfirmed attachment is saved under `attachments/` beside the state file (normally
+`state/attachments/`). A best-effort warning includes the local path, and the task continues
+without waiting for that warning. Normal task, gate, planning and configuration flows never
+upload files. Gate and command logs stay local; role-change diffs appear inline before confirmation.
+
+`/diff` sends changes from the current task's implementation-session start commit to the current
+HEAD (using the review-session start if there is no implementation). Without a current task it
+sends HEAD's commit patch. `/diff <hash>` sends only that commit's patch and also supports an
+abbreviated commit hash. This read-only command can be used while an agent or gate is running.
+Uncommitted edits are not included. For example, `/diff bce0e28` requests that repair commit.
 
 ## Planning, chat, and summaries
 
@@ -341,9 +359,9 @@ Telebaton owns the full gate after commits. Checkers receive its SHA, commands, 
 log path, plus whether it still matches the current tree. They should use that evidence and
 focused experiments instead of repeating a green full gate on unchanged code.
 
-Feedback and review return a readable report plus one fenced `conductor-feedback` JSON block:
+Feedback and review return a readable report plus one fenced `telebaton-feedback` JSON block:
 
-```conductor-feedback
+```telebaton-feedback
 {
   "verdict": "findings",
   "findings": [{
@@ -362,9 +380,17 @@ The reply ends with matching `VERDICT: findings` or `VERDICT: clean`. Categories
 coverage gap to its bug; `duplicateOf` identifies a repeated finding. Both can reference a local
 key or an existing ID. A clean report has no new, reopened, or unresolved actionable findings.
 
+Checker prompts include a checklist of pending claimed fixes and a separate mapping of duplicates
+to their originals. For example, if `0295-F08` duplicates `0295-F04`, assess `0295-F04` and omit
+`0295-F08` from `verifications`. Duplicate chains resolve to the original; `relatedTo` findings
+remain separate and each pending related fix needs its own assessment. Summaries show
+`verification follows 0295-F04` for a duplicate, rather than a separate pending verification.
+Submitting a duplicate verification is rejected with the original ID and correction instructions;
+evidence is never silently transferred between IDs.
+
 The implementer, or reviewer answering `/fix`, records a disposition for every requested ID:
 
-```conductor-dispositions
+```telebaton-dispositions
 {
   "dispositions": [{
     "id": "0169-F01",

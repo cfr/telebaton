@@ -39,7 +39,7 @@ test('counter resets begin a new epoch and absent completion usage stays unmeter
 });
 
 test('historical rebuild updates usage only, supports dry-run and repeat runs, and preserves other harnesses', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-usage-rebuild-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-usage-rebuild-'));
     const state = join(dir, 'state'), logs = join(dir, 'logs'); mkdirSync(state); mkdirSync(logs);
     try {
         const t = fixture();

@@ -151,7 +151,7 @@ test('one provider failing does not hide other quotas or expose error bodies and
 });
 
 test('credential exports use the configured service and sanitize failures that contain secrets', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-limit-credentials-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-limit-credentials-'));
     const executable = join(dir, 'opencode');
     const args = join(dir, 'args.json');
     const originalPassword = process.env.OPENCODE_PASSWORD;
@@ -179,7 +179,7 @@ else {if(process.env.OPENCODE_PASSWORD!=='fixture-password')process.exit(1);cons
 });
 
 test('Codex limits use the account-only handshake and reap the CLI before returning', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-limit-rpc-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-limit-rpc-'));
     const executable = join(dir, 'codex');
     const requests = join(dir, 'requests.jsonl');
     try {
@@ -194,7 +194,7 @@ require('readline').createInterface({input:process.stdin}).on('line',line=>{
         assert.deepEqual(await readCodexLimits(executable), codex);
         const messages = readFileSync(requests, 'utf8').trim().split('\n').map((s) => JSON.parse(s));
         assert.deepEqual(messages.map((m) => m.method), ['initialize', 'initialized', 'account/rateLimits/read']);
-        assert.equal(messages[0].params.clientInfo.name, 'conductor');
+        assert.equal(messages[0].params.clientInfo.name, 'telebaton');
         writeFileSync(executable, '#!/usr/bin/env node\nprocess.on("SIGTERM",()=>{});setInterval(()=>{},1000);', { mode: 0o700 });
         await assert.rejects(readCodexLimits(executable, 300), /timed out/);
         writeFileSync(executable, '#!/usr/bin/env node\nconsole.log(JSON.stringify({id:1,error:{code:-1,message:"private"}}));setInterval(()=>{},1000);', { mode: 0o700 });

@@ -25,6 +25,8 @@ Each project carries its own config in `telebaton.toml` at the repo root, next t
 notes for humans are TOML comments. Commands pick an agent by name, or fall back to the role
 default.
 Legacy `CONDUCTOR.toml` is used when `telebaton.toml` is absent; role edits use the selected file.
+`TELEBATON_CONFIG` overrides the local config path, falling back to the legacy `CONDUCTOR_CONFIG`
+only when the new variable is unset.
 
 ```toml
 [gate]
@@ -89,7 +91,7 @@ The same loop as today, one command per step, with the bridge doing the bookkeep
      failed, fix it: ..."), then runs the gate again. A second failure is reported and the
      task waits for me.
    - Gate passes: the bridge posts the commit title and body, the diff stat, the gate outcome
-     and the agent's final message, with the full diff attached as a file, and goes on to the
+     and the agent's final message as text, and goes on to the
      feedback check (when configured) or straight to step 3.
    - Feedback (`roles.feedback`, one agent or a list, up to `[flow] feedback_rounds` times, default
      one per listed agent, 0 to skip): a cheaper agent checks the commits against a checklist (plan
@@ -143,11 +145,18 @@ including a manually requested gate, so a new task cannot replace state during a
 Any step can be followed by free text, which goes to the session that step talks to, so a
 review can turn into a discussion before `/fix`. Logs are exported throughout (see "Logs").
 
-Outgoing Telegram calls retry network failures and all API error responses up to eight times,
+Outgoing Telegram message calls retry network failures and API error responses up to eight times,
 waiting 1, 2, 5, 10, 20, 30, 60 and 60 seconds. Rate-limit `retry_after` values extend the relevant
 wait when necessary. The transformer handles raw unsuccessful API responses before grammY
 converts them to exceptions. Long polling retains its own retry handling; unrelated errors and
 cancelled requests are not retried.
+Each request has a 60-second timeout. `sendDocument` retries only explicit 429 rate-limit
+rejections: network and server errors leave delivery uncertain and must not cause automatic
+duplicate uploads. `Chat.sendFile` catches Telegram delivery failures, archives the content under
+`attachments/` beside the state file, and reports the failure to stderr with a best-effort text
+warning. It returns without awaiting the warning. Only `/diff` calls `sendFile`; normal flow,
+including gate failures, long reports and planning/config confirmations, never uploads files.
+Unrelated programming errors still propagate.
 
 ## Commands
 
@@ -247,13 +256,21 @@ started at (committed or not); the file is renamed on the next export.
 The bridge appends validation guidance, prior finding dispositions and gate evidence even to
 project-overridden prompts. `src/feedback.ts` owns these contracts and the handoff context;
 `src/findings.ts` validates reports and keeps one atomic JSON ledger per task beside bridge state.
-Reports use fenced `conductor-feedback` JSON; repair replies use `conductor-dispositions` JSON.
+Reports use fenced `telebaton-feedback` JSON; repair replies use `telebaton-dispositions` JSON.
+The parser also accepts legacy `conductor-feedback` and `conductor-dispositions` fences, counting
+both naming schemes together when enforcing a single block. Review handoffs recognize either
+name so existing threads can finish after an upgrade; new prompts use Telebaton names.
 Malformed replies remain pending and get one automatic correction turn, then the flow waits.
 
 Stable finding IDs, category, source agent/model/role/session/SHA, evidence, related/duplicate links,
 repair dispositions and actual fixing commits survive session replacement. Claimed fixes and
 checker verification are distinct; a verifier must use another session and a SHA containing the
 fixes. New checkers see rejection reasons so they can assess them rather than repeat paperwork.
+Prompts list required pending fix IDs separately from duplicate-to-original mappings. Only
+`duplicateOf` chains are followed; `relatedTo` fixes keep independent verification requirements.
+Duplicate IDs are omitted from verification entries, and the parser rejects any such entry with
+the original ID and correction instructions. Exported summaries say verification follows the
+original ID without changing the duplicate's stored verification state or transferring evidence.
 When configured, final review also verifies the last feedback repair. With automatic review
 disabled, a repeated final feedback agent can verify its preceding repair; repairs after the last
 configured round remain verification-pending. Findings fixed by `/fix` remain unverified until
@@ -397,8 +414,12 @@ landed starts with `plan_moved` (their list), so the agent re-reads `PLAN.md` be
   removes only the matching job. Telegram routing preserves the configured letter/digit/underscore
   command names and aliases. Explicit `/stop plan` and `/stop chat` never target another role.
 - The bridge's own gate run is the result it reports, not the agent's claim.
-- Long output (diffs, logs, gate failures) goes as attached files; command output is posted as
-  a code block cut to its newest lines; messages stay under Telegram's 4096-character limit.
+- Long messages keep the first two chunks and the ending, including the verdict, with a hint to
+  `/log` for full local session logs. Gate and command output is posted as a code block cut to its
+  newest lines; messages stay under Telegram's 4096-character limit. `/diff [hash]` explicitly
+  requests the task's committed changes (implementation/review start to a captured HEAD), or one
+  commit patch when a hash is supplied. Without a task it defaults to HEAD's patch. It does not
+  mutate task state or require an idle agent; hashes are validated and resolved before upload.
 
 ## Open questions
 

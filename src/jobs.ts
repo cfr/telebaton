@@ -76,7 +76,7 @@ export class Jobs {
         return join(this.dir, `${name}.log`);
     }
 
-    // a job's process group outlives the conductor if it exits without stop() (SIGKILL, crash)
+    // a job's process group outlives Telebaton if it exits without stop() (SIGKILL, crash)
     private pidFile(name: string): string {
         return join(this.dir, `${name}.pid`);
     }

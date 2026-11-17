@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { Conductor } from '../src/conductor.ts';
+import { Telebaton } from '../src/telebaton.ts';
 import { Store } from '../src/state.ts';
 import { FindingStore } from '../src/findings.ts';
 import type { AgentConfig, LocalConfig, ProjectCommand } from '../src/config.ts';
@@ -42,12 +42,12 @@ interface Harness {
     unsolicited(id: string, event: { phase: 'started' }): Promise<void>;
 }
 const feedback = (findings: unknown[], verifications: unknown[] = [], verdict = findings.length ? 'findings' : 'clean') =>
-    'Report.\n```conductor-feedback\n' + JSON.stringify({ findings, verifications, verdict }) + '\n```\nVERDICT: ' + verdict;
+    'Report.\n```telebaton-feedback\n' + JSON.stringify({ findings, verifications, verdict }) + '\n```\nVERDICT: ' + verdict;
 const finding = { key: 'bug', category: 'bug', summary: 'Routing skips prediction', location: 'code.txt:1', evidence: 'late arrival probe fails' };
-const answer = 'Fixed.\n```conductor-dispositions\n' + JSON.stringify({ dispositions: [{ id: '0170-F01', status: 'fixed', reason: 'Regression fails without fix' }] }) + '\n```';
+const answer = 'Fixed.\n```telebaton-dispositions\n' + JSON.stringify({ dispositions: [{ id: '0170-F01', status: 'fixed', reason: 'Regression fails without fix' }] }) + '\n```';
 
 function setup(feedbackReplies: string[], defaults: { review?: string; feedback?: string[] } = {}) {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-workflow-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-workflow-'));
     const project = join(dir, 'project');
     mkdirSync(project);
     const git = (...args: string[]) => execFileSync('git', args, { cwd: project, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -144,8 +144,8 @@ feedback_fix="Custom repair prompt: {findings}"
     const chat: Messenger = { onText: noop, command(name, handler) { commands.set(name, handler); }, send: async (text) => { sent.push(text); },
         sendMarkdown: noop, sendQuoted: noop, sendLog: noop, sendHtml: noop, sendFile: noop,
         ask: async () => 'keep', pendingQuestions: () => 0, takeOver: noop };
-    const conductor = new Conductor(local, store, chat);
-    const h = conductor as unknown as Harness;
+    const telebaton = new Telebaton(local, store, chat);
+    const h = telebaton as unknown as Harness;
     h.adapters = { codex: adapter, opencode: adapter, claude: adapter };
     const implId = randomUUID();
     const implAgent: AgentConfig = { name: 'kimi', model: 'test-kimi', tag: 'kimi', harness: 'codex' };
@@ -247,7 +247,7 @@ test('stop pauses future tasks and /next resumes a persisted queue without anoth
     await f.h.stop();
     assert.equal(f.store.state.taskQueue.paused, true);
     const store = new Store(f.local.stateFile);
-    const restarted = new Conductor(f.local, store, f.chat) as unknown as Harness;
+    const restarted = new Telebaton(f.local, store, f.chat) as unknown as Harness;
     restarted.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
     // The fake adapter closes over the fixture's Store, just as the live adapter reads persisted state.
     f.store.state = store.state;
@@ -412,6 +412,42 @@ test('failed repair gates cannot complete a task with automatic review disabled'
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('normal task flow never sends attachments; /diff delivers task changes or one commit on demand', async () => {
+    const f = setup([feedback([finding]), feedback([], [
+        { id: '0170-F01', status: 'verified', reason: 'Verified the repaired tree' },
+    ]), feedback([])]);
+    const files: { name: string; content: string; caption?: string }[] = [];
+    f.chat.sendFile = async (name, content, caption) => { files.push({ name, content, caption }); };
+    const initial = f.git('rev-parse', 'HEAD');
+    try {
+        await f.h.afterImplementGate();
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'glm', 'mm', 'sol']);
+        assert.equal(f.store.state.feedbackFixing, undefined);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.records.read('0170-task').findings[0].verification, 'verified');
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
+        assert.equal(files.length, 0);
+        const snapshot = readFileSync(f.local.stateFile, 'utf8');
+        f.h.busy = 'implement';
+        await f.commands.get('diff')!('');
+        assert.equal(files.length, 1);
+        assert.equal(files[0].name, '0170-task.diff');
+        assert.match(files[0].content, /diff --git a\/code.txt/);
+        assert.match(files[0].content, /\+after 1/);
+        assert.equal(readFileSync(f.local.stateFile, 'utf8'), snapshot);
+        await f.commands.get('diff')!(initial.slice(0, 7));
+        assert.match(files[1].content, /new file mode/);
+        assert.match(files[1].content, /\+before/);
+        assert.equal(files[1].name, `${initial.slice(0, 12)}.diff`);
+        await assert.rejects(f.commands.get('diff')!('--output=/tmp/nope'), /usage: \/diff/);
+        await assert.rejects(f.commands.get('diff')!('deadbeef'), /unknown commit/);
+        assert.equal(files.length, 2);
+        f.store.state.task = undefined;
+        await f.commands.get('diff')!('');
+        assert.equal(files[2].name, `${f.git('rev-parse', 'HEAD').slice(0, 12)}.diff`);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('full feedback flow records actual repair commits, passes ledger/gate context and exports findings', async () => {
     const f = setup([
         feedback([finding]),
@@ -429,8 +465,8 @@ test('full feedback flow records actual repair commits, passes ledger/gate conte
         const glm = f.prompts.find((p) => p.agent === 'glm')!.text;
         assert.match(glm, /Custom checker prompt/);
         assert.match(glm, /0170-F01 \[bug; fixed; verification pending\]/);
-        assert.match(glm, /Conductor gate: PASSED at/);
-        assert.match(glm, /Conductor owns the full verification gate/);
+        assert.match(glm, /Telebaton gate: PASSED at/);
+        assert.match(glm, /Telebaton owns the full verification gate/);
         assert.match(glm, /regression test failing without the fix/);
         assert.match(glm, /real caller\/entry path/);
         assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
@@ -458,7 +494,7 @@ for (const role of ['feedback', 'review'] as const) test(`${role} retries forwar
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test('malformed feedback retries once and stays pending across a restarted conductor', async () => {
+test('malformed feedback retries once and stays pending across a restarted telebaton', async () => {
     const f = setup(['Intro only', 'VERDICT: clean']);
     try {
         await f.h.afterImplementGate();
@@ -466,7 +502,7 @@ test('malformed feedback retries once and stays pending across a restarted condu
         assert.equal(f.records.read('0170-task').reports.length, 2);
         assert.ok(f.records.read('0170-task').reports.every((r) => r.error));
         assert.match(f.sent.at(-1)!, /task flow paused/);
-        const restarted = new Conductor(f.local, new Store(f.local.stateFile), f.chat) as unknown as Harness;
+        const restarted = new Telebaton(f.local, new Store(f.local.stateFile), f.chat) as unknown as Harness;
         restarted.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
         for (const [id, session] of f.sessions) {
             const ref = Object.entries(f.store.state.sessions).find(([, r]) => r?.id === id);
@@ -486,7 +522,7 @@ test('malformed dispositions are corrected without losing the original repair co
         await f.h.afterImplementGate();
         assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'kimi', 'glm', 'mm', 'sol']);
         for (const prompt of f.prompts.filter((p) => p.agent === 'kimi')) {
-            const blocks = [...prompt.text.matchAll(/```conductor-dispositions\n([\s\S]*?)\n```/g)];
+            const blocks = [...prompt.text.matchAll(/```telebaton-dispositions\n([\s\S]*?)\n```/g)];
             assert.equal(blocks.length, 1);
             assert.deepEqual(JSON.parse(blocks[0][1]).dispositions.map((d: { id: string }) => d.id), ['0170-F01']);
             assert.doesNotMatch(prompt.text, /TASK-F01/);
@@ -507,7 +543,7 @@ test('repair and correction examples include every actual requested finding ID',
         const repairs = f.prompts.filter((p) => p.agent === 'kimi');
         assert.equal(repairs.length, 2);
         for (const prompt of repairs) {
-            const blocks = [...prompt.text.matchAll(/```conductor-dispositions\n([\s\S]*?)\n```/g)];
+            const blocks = [...prompt.text.matchAll(/```telebaton-dispositions\n([\s\S]*?)\n```/g)];
             assert.equal(blocks.length, 1);
             assert.deepEqual(JSON.parse(blocks[0][1]).dispositions.map((d: { id: string }) => d.id), ['0170-F01', '0170-F02']);
             assert.doesNotMatch(prompt.text, /TASK-F/);
@@ -530,12 +566,39 @@ test('final review independently verifies fixes from the last feedback checker',
     } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('checkers receive duplicate mappings and correction prompts name the original without transferring verification', async () => {
+    const f = setup([
+        feedback([finding]),
+        feedback([{ ...finding, key: 'repeat', duplicateOf: '0170-F01' }],
+            [{ id: '0170-F01', status: 'verified', reason: 'Independent regression check' }], 'clean'),
+        feedback([], [{ id: '0170-F02', status: 'verified', reason: 'Mistaken duplicate verification' }]),
+        feedback([]),
+    ]);
+    try {
+        await f.h.afterImplementGate();
+        const mm = f.prompts.filter((p) => p.agent === 'mm');
+        assert.equal(mm.length, 2);
+        assert.match(mm[0].text, /Verification checklist:/);
+        assert.match(mm[0].text, /No pending claimed fixes/);
+        assert.match(mm[0].text, /0170-F02 duplicates 0170-F01/);
+        assert.match(mm[0].text, /0170-F02 \[bug; duplicate; verification follows 0170-F01\]/);
+        assert.match(mm[1].text, /0170-F02 is a duplicate of 0170-F01.*omit 0170-F02 from verifications/);
+        assert.match(f.prompts.find((p) => p.agent === 'sol')!.text, /0170-F02 duplicates 0170-F01/);
+        const l = f.records.read('0170-task');
+        assert.equal(l.reports.filter((r) => r.error).length, 1);
+        assert.equal(l.findings[0].verification, 'verified');
+        assert.equal(l.findings[1].disposition, 'duplicate');
+        assert.equal(l.findings[1].history.length, 0);
+        assert.equal(f.store.state.taskComplete, true);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('rejected findings and duplicate paperwork reach later checkers without another repair or gate', async () => {
     const f = setup([feedback([{ ...finding, category: 'process', summary: 'Rewrite old commit body' }]),
         feedback([{ ...finding, key: 'repeat', duplicateOf: '0170-F01' }],
             [{ id: '0170-F01', status: 'accepted_rejection', reason: 'New-commit rule prohibits rewriting history' }], 'clean'), feedback([])]);
     f.setImplementationCommits(false);
-    f.setImplementationReplies(['```conductor-dispositions\n' + JSON.stringify({ dispositions: [
+    f.setImplementationReplies(['```telebaton-dispositions\n' + JSON.stringify({ dispositions: [
         { id: '0170-F01', status: 'rejected', reason: 'Requires history rewrite prohibited by instructions' },
     ] }) + '\n```']);
     try {
@@ -613,6 +676,20 @@ test('gate-failure repair commits stay linked and require dispositions before su
 });
 
 
+test('an existing review can submit a legacy report after switching to Telebaton prompts', async () => {
+    const f = setup([feedback([]), feedback([]), feedback([])]);
+    f.setReviewReplies([feedback([]), feedback([finding]).replaceAll('telebaton-', 'conductor-')]);
+    try {
+        await f.h.afterImplementGate();
+        assert.equal(f.store.state.taskComplete, true);
+        await f.h.continueTurn('review check one more boundary');
+        assert.equal(f.store.state.taskComplete, false);
+        assert.equal(f.records.read('0170-task').findings[0].id, '0170-F01');
+        assert.match(f.prompts[0].text, /fenced telebaton-feedback JSON block/);
+        assert.ok(f.records.read('0170-task').reports.every((r) => !r.error));
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('discussion after a completed review stays conversational and does not trigger report retries', async () => {
     const f = setup([feedback([]), feedback([]), feedback([])]);
     f.setReviewReplies([feedback([finding]), 'The routing decision uses the wrong tick source.']);
@@ -620,7 +697,7 @@ test('discussion after a completed review stays conversational and does not trig
         await f.h.afterImplementGate();
         await f.h.continueTurn('review explain the finding');
         assert.equal(f.prompts.filter((p) => p.agent === 'sol').length, 2);
-        assert.doesNotMatch(f.prompts.at(-1)!.text, /exactly one fenced conductor-feedback/);
+        assert.doesNotMatch(f.prompts.at(-1)!.text, /exactly one fenced telebaton-feedback/);
         assert.equal(f.records.read('0170-task').reports.filter((r) => r.kind === 'review').length, 1);
         assert.ok(!f.sent.some((s) => s.includes('review report pending')));
     } finally { rmSync(f.dir, { recursive: true, force: true }); }
@@ -699,7 +776,7 @@ test('pending turn waits survive restart and are processed only once', async () 
         await f.h.settle('implement', { outcome: 'succeeded', text: 'Done' });
         await f.h.shutdown();
         const restoredStore = new Store(f.local.stateFile);
-        restored = new Conductor(f.local, restoredStore, f.chat) as unknown as Harness;
+        restored = new Telebaton(f.local, restoredStore, f.chat) as unknown as Harness;
         restored.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
         restored.live.set('implement', impl);
         await restored.drainWork();
@@ -814,7 +891,7 @@ test('skip interrupts active feedback, waits for pending work across restart, an
         assert.ok(f.sent.some((s) => s.includes('already requested')));
         await f.h.shutdown();
         const store = new Store(f.local.stateFile);
-        restored = new Conductor(f.local, store, f.chat) as unknown as Harness;
+        restored = new Telebaton(f.local, store, f.chat) as unknown as Harness;
         restored.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
         restored.live.set('feedback', checker!);
         pending = false;
@@ -992,7 +1069,7 @@ test('quota-failed terminal children transfer to the new agent and handoff survi
         assert.equal(f.prompts.length, 0);
         await f.h.shutdown();
         const store = new Store(f.local.stateFile);
-        restored = new Conductor(f.local, store, f.chat) as unknown as Harness;
+        restored = new Telebaton(f.local, store, f.chat) as unknown as Harness;
         restored.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
         restored.live.set('implement', f.h.live.get('implement')!);
         await restored.continueTurn('implement');
@@ -1019,7 +1096,7 @@ test('agent swap waits for running children, then hands off exactly once', async
         assert.equal(f.store.state.sessions.implement!.swapRequested, 'sol');
         await f.h.shutdown();
         const store = new Store(f.local.stateFile);
-        restored = new Conductor(f.local, store, f.chat) as unknown as Harness;
+        restored = new Telebaton(f.local, store, f.chat) as unknown as Harness;
         restored.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
         restored.live.set('implement', impl);
         running = false;
@@ -1128,7 +1205,7 @@ test('kept role changes accumulate across restart and commit together', async ()
     let restored: Harness | undefined;
     const config = join(f.project, 'telebaton.toml');
     const diffs: string[] = [];
-    f.chat.sendFile = async (_name, content) => { diffs.push(content); };
+    f.chat.sendLog = async (_title, content) => { diffs.push(content); };
     try {
         f.chat.ask = async () => 'keep';
         await f.h.rolesCommand('implement sol');
@@ -1136,7 +1213,7 @@ test('kept role changes accumulate across restart and commit together', async ()
         assert.equal(f.git('log', '-1', '--format=%s'), 'Initial');
         await f.h.shutdown();
         const store = new Store(f.local.stateFile);
-        restored = new Conductor(f.local, store, f.chat) as unknown as Harness;
+        restored = new Telebaton(f.local, store, f.chat) as unknown as Harness;
         restored.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
         restored.live.set('implement', f.h.live.get('implement')!);
         f.chat.ask = async () => 'commit';

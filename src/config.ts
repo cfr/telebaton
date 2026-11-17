@@ -33,7 +33,7 @@ export interface ProjectCommand {
 
 export const builtinCommands = [
     'help', 'start', 'next', 'review', 'fix', 'feedback', 'continue', 'gate', 'todo', 'plan', 'chat', 'summary', 'agents',
-    'status', 'stop', 'skip', 'log', 'roles', 'agent', 'swap', 'usage',
+    'status', 'stop', 'skip', 'log', 'roles', 'agent', 'swap', 'usage', 'diff',
 ];
 
 export interface GateStep {
@@ -356,6 +356,10 @@ export function parseProjectConfig(root: string, toml: string): ProjectConfig {
     }
 
     return { root, logDir, gate, roles, feedbackRounds, agents, prompts, commands };
+}
+
+export function localConfigPath(root: string, env: Record<string, string | undefined> = process.env): string {
+    return resolve(env.TELEBATON_CONFIG ?? env.CONDUCTOR_CONFIG ?? resolve(root, 'config.toml'));
 }
 
 export function projectConfigPath(root: string): string {

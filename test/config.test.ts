@@ -3,7 +3,13 @@ import { test } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fill, loadProjectConfig, parseProjectConfig, projectConfigPath } from '../src/config.ts';
+import { fill, loadProjectConfig, localConfigPath, parseProjectConfig, projectConfigPath } from '../src/config.ts';
+
+test('local config prefers TELEBATON_CONFIG and accepts the legacy environment variable', () => {
+    assert.equal(localConfigPath('/install', {}), '/install/config.toml');
+    assert.equal(localConfigPath('/install', { CONDUCTOR_CONFIG: '/legacy/config.toml' }), '/legacy/config.toml');
+    assert.equal(localConfigPath('/install', { TELEBATON_CONFIG: '/new/config.toml', CONDUCTOR_CONFIG: '/legacy/config.toml' }), '/new/config.toml');
+});
 
 const base = `
 [gate]
@@ -96,6 +102,7 @@ aliases = ["server"]
     assert.throws(() => parseProjectConfig('/r', base + '[commands.agent]\ncmd = "x"\n'), /built-in/);
     assert.throws(() => parseProjectConfig('/r', base + '[commands.swap]\ncmd = "x"\n'), /built-in/);
     assert.throws(() => parseProjectConfig('/r', base + '[commands.usage]\ncmd = "x"\n'), /built-in/);
+    assert.throws(() => parseProjectConfig('/r', base + '[commands.diff]\ncmd = "x"\n'), /built-in/);
     assert.throws(() => parseProjectConfig('/r', base + '[commands.Deploy]\ncmd = "x"\n'), /lowercase/);
     assert.deepEqual(c.commands.map((x) => x.aliases), [[], ['server']]);
     assert.throws(() => parseProjectConfig('/r', base + extra.replace('["server"]', '["deploy"]')), /already taken/);

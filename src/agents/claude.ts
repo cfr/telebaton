@@ -155,13 +155,13 @@ class ClaudeSession implements AgentSession {
         return [];
     }
 
-    // The SDK's claude process dies with the conductor, so a lost turn never runs on.
+    // The SDK's claude process dies with Telebaton, so a lost turn never runs on.
     async turnState(): Promise<TurnState> {
         const last = readClaudeTranscript(this.id)?.messages.at(-1);
         if (last?.role === 'assistant' && last.parts.at(-1)?.kind === 'text') {
             return { running: false, outcome: 'succeeded' };
         }
-        return { running: false, outcome: 'interrupted', error: 'the conductor stopped during the turn' };
+        return { running: false, outcome: 'interrupted', error: 'Telebaton stopped during the turn' };
     }
 
     async transcript(): Promise<Transcript | undefined> {

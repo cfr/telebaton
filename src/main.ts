@@ -1,7 +1,7 @@
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadLocalConfig } from './config.ts';
-import { Conductor } from './conductor.ts';
+import { loadLocalConfig, localConfigPath } from './config.ts';
+import { Telebaton } from './telebaton.ts';
 import { Store } from './state.ts';
 import { Chat, describeError } from './telegram.ts';
 
@@ -17,12 +17,12 @@ function stamp(): string {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
-const configFile = resolve(process.env.CONDUCTOR_CONFIG ?? resolve(here, '..', 'config.toml'));
+const configFile = localConfigPath(resolve(here, '..'));
 
 const local = loadLocalConfig(configFile);
 const store = new Store(local.stateFile);
-const chat = new Chat(local.telegram.token, local.telegram.allowedUserId);
-const conductor = new Conductor(local, store, chat);
+const chat = new Chat(local.telegram.token, local.telegram.allowedUserId, join(dirname(local.stateFile), 'attachments'));
+const telebaton = new Telebaton(local, store, chat);
 
 let quitting = false;
 
@@ -38,7 +38,7 @@ async function quit(code: number) {
         process.exit(code || 1);
     }, 15000).unref();
     chat.stop();
-    await conductor.shutdown().catch((e: Error) => console.error('shutdown:', e.message));
+    await telebaton.shutdown().catch((e: Error) => console.error('shutdown:', e.message));
     process.exit(code);
 }
 
@@ -65,7 +65,7 @@ process.on('unhandledRejection', (e) => console.error('unhandled:', describeErro
 try {
     await chat.start(() => {
         console.log(`Telebaton: polling Telegram for ${local.project}`);
-        conductor.announce().catch((e: Error) => console.error('announce:', e.message));
+        telebaton.announce().catch((e: Error) => console.error('announce:', e.message));
     });
 } catch (e) {
     console.error(describeError(e));

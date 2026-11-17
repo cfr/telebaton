@@ -12,7 +12,7 @@ const agent = { name: 'codex', harness: 'codex' as const, model: 'test-model', t
 const asker = { permission: async () => 'reject' as const, question: async () => '' };
 
 test('Codex persists thread, resumes, exports tools and usage, and changes sandbox', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-codex-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-codex-'));
     try {
         const executable = join(dir, 'fake-codex');
         writeFileSync(executable, `#!/bin/sh
@@ -76,7 +76,7 @@ printf '{"type":"turn.completed","usage":{"input_tokens":%s,"cached_input_tokens
 });
 
 test('Codex missing executable returns failure', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-codex-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-codex-'));
     try {
         const session = await new CodexAdapter(dir, join(dir, 'missing')).create(agent, { title: 'test', cwd: dir, asker });
         assert.equal((await session.send('test')).outcome, 'failed');
@@ -91,7 +91,7 @@ test('Codex config accepts effort and rejects Claude permission modes', () => {
 });
 
 test('Codex process ownership survives host exit and shutdown prevents additional turns', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-codex-owner-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-codex-owner-'));
     const executable = join(dir, 'fake-codex');
     const pidFile = join(dir, 'pid');
     const module = new URL('../src/agents/codex.ts', import.meta.url).href;
@@ -129,7 +129,7 @@ writeFileSync(${JSON.stringify(join(dir, 'id'))},s.id);void s.send('hello');setT
 });
 
 test('Codex shutdown interrupts a live turn and closes every session', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-codex-shutdown-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-codex-shutdown-'));
     const executable = join(dir, 'fake-codex');
     const pidFile = join(dir, 'pid');
     writeFileSync(executable, `#!/usr/bin/env node

@@ -86,7 +86,8 @@ function choice<T extends string>(v: unknown, field: string, choices: readonly T
     return v as T;
 }
 function block(text: string, kind: string): Record<string, unknown> {
-    const openings = [...text.matchAll(new RegExp('^```' + kind + '[ \\t]*\\r?\\n', 'gm'))];
+    const legacy = kind.replace('telebaton-', 'conductor-');
+    const openings = [...text.matchAll(new RegExp('^```(?:' + kind + '|' + legacy + ')[ \\t]*\\r?\\n', 'gm'))];
     if (openings.length !== 1) {
         throw new Error(`include exactly one fenced ${kind} JSON block (found ${openings.length} opening fences)`);
     }
@@ -94,15 +95,18 @@ function block(text: string, kind: string): Record<string, unknown> {
     const closing = /^```[ \t]*\r?$/m.exec(body);
     if (!closing) {
         throw new Error(`missing closing \`\`\` fence after the ${kind} JSON; put \`\`\` on its own line after the JSON` +
-            (kind === 'conductor-feedback' ? ', then put VERDICT: clean or VERDICT: findings outside the code block' : ''));
+            (kind === 'telebaton-feedback' ? ', then put VERDICT: clean or VERDICT: findings outside the code block' : ''));
     }
     let parsed: unknown;
     try { parsed = JSON.parse(body.slice(0, closing.index)); }
     catch (e) { throw new Error(`invalid JSON in ${kind} block: ${(e as Error).message}`); }
     return object(parsed);
 }
+export function hasFeedbackFence(text: string): boolean {
+    return /^```(?:telebaton|conductor)-feedback[ \t]*\r?$/m.test(text);
+}
 export function parseFeedback(text: string): Feedback {
-    const b = block(text, 'conductor-feedback');
+    const b = block(text, 'telebaton-feedback');
     const verdict = choice(b.verdict, 'verdict', ['clean', 'findings']);
     const endings = [...text.matchAll(/^VERDICT: (clean|findings)\s*$/gm)];
     if (endings.length !== 1 || endings[0][1] !== verdict) throw new Error('VERDICT line must agree with JSON verdict');
@@ -159,9 +163,13 @@ export function applyFeedback(ledger: Ledger, text: string, source: Source): str
     for (const v of report.verifications) {
         const f = byId.get(v.id);
         if (!f) throw new Error(`unknown verification ${v.id}`);
+        if (f.disposition === 'duplicate') {
+            const original = originalFinding(f, byId);
+            throw new Error(`${v.id} is a duplicate of ${original.id}. Assess the original finding ${original.id}; omit ${v.id} from verifications.`);
+        }
         if (v.status === 'verified' && f.disposition !== 'fixed') throw new Error(`${v.id} has no claimed fix to verify`);
         if (['verified', 'accepted_rejection'].includes(v.status) && f.answerSession === source.session) throw new Error(`${v.id} needs verification by another session`);
-        if (v.status === 'accepted_rejection' && !['rejected', 'deferred', 'duplicate'].includes(f.disposition)) {
+        if (v.status === 'accepted_rejection' && !['rejected', 'deferred'].includes(f.disposition)) {
             throw new Error(`${v.id} has no rejection/deferral to accept`);
         }
     }
@@ -185,7 +193,7 @@ export function applyFeedback(ledger: Ledger, text: string, source: Source): str
 }
 
 export function applyDispositions(ledger: Ledger, text: string, source: Source, expected: string[], commits: string[]): void {
-    const b = block(text, 'conductor-dispositions');
+    const b = block(text, 'telebaton-dispositions');
     const answers = list(b.dispositions, 'dispositions').map((raw): Answer => {
         const a = object(raw);
         return { id: string(a.id, 'id'), status: choice(a.status, 'status', ['fixed', 'rejected', 'deferred']), reason: string(a.reason, 'reason') };
@@ -209,9 +217,41 @@ export function applyDispositions(ledger: Ledger, text: string, source: Source, 
     }
 }
 
+function originalFinding(finding: Finding, byId: Map<string, Finding>): Finding {
+    const seen = new Set<string>();
+    let current = finding;
+    while (current.disposition === 'duplicate' && current.duplicateOf) {
+        if (seen.has(current.id)) throw new Error('finding links must not contain cycles');
+        seen.add(current.id);
+        const original = byId.get(current.duplicateOf);
+        if (!original) throw new Error(`invalid finding reference ${current.duplicateOf}`);
+        current = original;
+    }
+    return current;
+}
+
+export function verificationChecklist(ledger: Ledger): string {
+    const pending = ledger.findings.filter((f) => f.disposition === 'fixed' && f.verification === 'pending');
+    const byId = new Map(ledger.findings.map((f) => [f.id, f]));
+    const duplicates = ledger.findings.filter((f) => f.disposition === 'duplicate');
+    return [
+        'Verification checklist:',
+        ...(pending.length ? ['Required pending fixes (assess each ID independently):',
+            ...pending.map((f) => `- ${f.id}: ${f.summary}`)] : ['No pending claimed fixes require verification.']),
+        ...(duplicates.length ? ['Duplicates (omit these IDs from verifications; only originals listed above require verification):',
+            ...duplicates.map((f) => {
+                const original = originalFinding(f, byId);
+                return `- ${f.id} duplicates ${original.id}; original is ${original.disposition}, verification ${original.verification}.`;
+            })] : []),
+        'relatedTo links do not merge findings: related fixes still need their own verification entries.',
+    ].join('\n');
+}
+
 export function findingSummary(ledger: Ledger): string {
     if (!ledger.findings.length) return 'No tracked findings yet.';
-    return ledger.findings.map((f) => `${f.id} [${f.category}; ${f.disposition}; verification ${f.verification}] ` +
+    const byId = new Map(ledger.findings.map((f) => [f.id, f]));
+    return ledger.findings.map((f) => `${f.id} [${f.category}; ${f.disposition}; verification ${
+        f.disposition === 'duplicate' ? `follows ${originalFinding(f, byId).id}` : f.verification}] ` +
         `${f.summary} (${f.location}); checker ${f.source.agent} at ${f.source.sha}. Evidence: ${f.evidence}` +
         `${f.relatedTo ? `; related to ${f.relatedTo}` : ''}${f.duplicateOf ? `; duplicate of ${f.duplicateOf}` : ''}` +
         `${f.reason ? `; implementer: ${f.reason}` : ''}${f.fixCommits.length ? `; fixing commits ${f.fixCommits.join(', ')}` : ''}` +

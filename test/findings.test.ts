@@ -3,15 +3,36 @@ import { test } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { applyFeedback, applyDispositions, findingStats, FindingStore, type Ledger, type Source } from '../src/findings.ts';
+import { applyFeedback, applyDispositions, findingStats, findingSummary, hasFeedbackFence, verificationChecklist, FindingStore, type Ledger, type Source } from '../src/findings.ts';
 
 const checker: Source = { agent: 'dsf', model: 'deepseek/flash', session: 'check', sha: 'abc', log: '/project/wlog/task-check.md' };
 const implementer: Source = { ...checker, agent: 'kimi', model: 'kimi/pro', session: 'impl', sha: 'def' };
 const ledger = (): Ledger => ({ version: 1, task: '0169-late-events', findings: [], reports: [] });
 const finding = (key = 'bug1') => ({ key, category: 'bug', summary: 'Prediction skipped', location: 'client.cpp:234', evidence: '100-part0 then 99-part0/1 reproduces it' });
 const report = (findings: unknown[], verifications: unknown[] = [], verdict = findings.length ? 'findings' : 'clean') =>
-    'Readable explanation.\n```conductor-feedback\n' + JSON.stringify({ verdict, findings, verifications }) + '\n```\nVERDICT: ' + verdict;
-const answers = (dispositions: unknown[]) => '```conductor-dispositions\n' + JSON.stringify({ dispositions }) + '\n```';
+    'Readable explanation.\n```telebaton-feedback\n' + JSON.stringify({ verdict, findings, verifications }) + '\n```\nVERDICT: ' + verdict;
+const answers = (dispositions: unknown[]) => '```telebaton-dispositions\n' + JSON.stringify({ dispositions }) + '\n```';
+
+test('canonical and legacy report fences work, but mixed duplicate blocks remain invalid', () => {
+    for (const name of ['telebaton', 'conductor']) {
+        const l = ledger();
+        const convert = (text: string) => text.replaceAll('telebaton-', `${name}-`);
+        const text = convert(report([finding()]));
+        assert.equal(hasFeedbackFence(text), true);
+        const ids = applyFeedback(l, text, checker);
+        const disposition = convert(answers([{ id: ids[0], status: 'fixed', reason: 'Fixed with regression' }]));
+        applyDispositions(l, disposition, implementer, ids, ['def']);
+        const before = structuredClone(l);
+        const mixed = report([]) + '\n' + report([]).replaceAll('telebaton-', 'conductor-');
+        assert.throws(() => applyFeedback(l, mixed, checker), /found 2 opening fences/);
+        assert.throws(() => applyDispositions(l, disposition + '\n' + disposition.replace(name, name === 'telebaton' ? 'conductor' : 'telebaton'), implementer, ids, ['def']),
+            /found 2 opening fences/);
+        assert.deepEqual(l, before);
+        applyFeedback(l, convert(report([], [{ id: ids[0], status: 'verified', reason: 'Independent test' }])), checker);
+        assert.equal(l.findings[0].verification, 'verified');
+    }
+    assert.equal(hasFeedbackFence('The report format is telebaton-feedback.'), false);
+});
 
 test('stable IDs, related coverage, disposition and independent verification remain distinct', () => {
     const l = ledger();
@@ -58,6 +79,44 @@ test('duplicate links preserve provenance; unresolved bugs stay actionable; cycl
     assert.equal(l.findings.length, 2);
 });
 
+test('duplicate verification follows the original through chains while related fixes remain independent', () => {
+    const l = ledger();
+    const ids = applyFeedback(l, report([
+        finding(), { ...finding('coverage'), category: 'test_gap', relatedTo: 'bug1' },
+        { ...finding('repeat'), duplicateOf: 'bug1' },
+        { ...finding('repeatAgain'), duplicateOf: 'repeat' },
+        { ...finding('repeatCoverage'), duplicateOf: 'coverage' },
+    ]), checker);
+    assert.deepEqual(ids, ['0169-F01', '0169-F02']);
+    applyDispositions(l, answers(ids.map((id) => ({ id, status: 'fixed', reason: 'Fixed with negative-control regression' }))),
+        implementer, ids, ['def']);
+    const before = structuredClone(l);
+    for (const status of ['verified', 'open', 'accepted_rejection']) {
+        assert.throws(() => applyFeedback(l, report([], [{ id: '0169-F04', status, reason: 'Checked' }]), checker),
+            /0169-F04 is a duplicate of 0169-F01.*Assess the original finding 0169-F01; omit 0169-F04 from verifications/);
+        assert.deepEqual(l, before);
+    }
+    assert.throws(() => applyFeedback(l, report([], [{ id: '0169-F05', status: 'verified', reason: 'Checked' }]), checker),
+        /0169-F05 is a duplicate of 0169-F02/);
+    assert.throws(() => applyFeedback(l, report([], [{ id: ids[0], status: 'verified', reason: 'Checked bug' }]), checker),
+        /verify pending fix 0169-F02/);
+    assert.deepEqual(l, before);
+    const checklist = verificationChecklist(l);
+    const required = checklist.split('Duplicates')[0];
+    assert.match(required, /0169-F01/);
+    assert.match(required, /0169-F02/);
+    assert.doesNotMatch(required, /0169-F0[345]/);
+    assert.match(checklist, /0169-F04 duplicates 0169-F01/);
+    assert.match(checklist, /0169-F05 duplicates 0169-F02/);
+    const summary = findingSummary(l);
+    assert.match(summary, /0169-F04 \[bug; duplicate; verification follows 0169-F01\]/);
+    assert.match(summary, /0169-F05 \[bug; duplicate; verification follows 0169-F02\]/);
+    applyFeedback(l, report([], ids.map((id) => ({ id, status: 'verified', reason: 'Independent negative control passed' }))), checker);
+    assert.match(verificationChecklist(l), /No pending claimed fixes/);
+    assert.equal(l.findings[3].verification, 'pending');
+    assert.equal(l.findings[3].history.length, 0);
+});
+
 test('dispositions require every requested ID, explanations, and real commits for fixed claims', () => {
     const l = ledger();
     const ids = applyFeedback(l, report([finding(), finding('second')]), checker);
@@ -73,7 +132,7 @@ test('records survive restart, preserve malformed reports, deduplicate replay an
         const store = new FindingStore(join(dir, 'state'));
         const task = '0169-late-events';
         const invalid = store.record(task, 'feedback', 'No JSON\nVERDICT: clean', checker);
-        assert.match(invalid.error!, /conductor-feedback/);
+        assert.match(invalid.error!, /telebaton-feedback/);
         assert.equal(store.read(task).findings.length, 0);
         const text = report([finding()]);
         const first = store.record(task, 'feedback', text, checker);
@@ -105,13 +164,13 @@ test('missing closing fences identify the repair for feedback and dispositions w
     const ids = applyFeedback(l, report([finding()]), checker);
     const before = structuredClone(l);
     const unclosed = answers([{ id: ids[0], status: 'fixed', reason: 'Fixed' }]).replace(/\n```$/, '');
-    assert.throws(() => applyDispositions(l, unclosed, implementer, ids, ['def']), /missing closing ``` fence.*conductor-dispositions/);
+    assert.throws(() => applyDispositions(l, unclosed, implementer, ids, ['def']), /missing closing ``` fence.*telebaton-dispositions/);
     assert.deepEqual(l, before);
 });
 
 test('block parsing accepts CRLF, rejects extra unclosed blocks, and preserves JSON parser errors', () => {
     assert.deepEqual(applyFeedback(ledger(), report([]).replaceAll('\n', '\r\n'), checker), []);
-    assert.throws(() => applyFeedback(ledger(), report([]) + '\n```conductor-feedback\n{}', checker), /found 2 opening fences/);
-    assert.throws(() => applyFeedback(ledger(), '```conductor-feedback\n{"verdict": }\n```\nVERDICT: clean', checker),
-        /invalid JSON in conductor-feedback block: .+/);
+    assert.throws(() => applyFeedback(ledger(), report([]) + '\n```telebaton-feedback\n{}', checker), /found 2 opening fences/);
+    assert.throws(() => applyFeedback(ledger(), '```telebaton-feedback\n{"verdict": }\n```\nVERDICT: clean', checker),
+        /invalid JSON in telebaton-feedback block: .+/);
 });

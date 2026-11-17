@@ -53,7 +53,7 @@ export function readCodexLimits(executable = 'codex', timeoutMs = 20000): Promis
             }
         });
         send({ method: 'initialize', id: 1, params: {
-            clientInfo: { name: 'conductor', title: 'Conductor', version: '0.1.0' },
+            clientInfo: { name: 'telebaton', title: 'Telebaton', version: '0.1.0' },
         } });
     });
 }

@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { Jobs, logTail } from '../src/jobs.ts';
 
 test('one-shot runs to a log, background jobs stop with their children', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-jobs-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-jobs-'));
     const jobs = new Jobs(dir);
     const r = await jobs.run('once', 'echo one; echo two >&2; exit 3', dir);
     assert.equal(r.code, 3);
@@ -30,7 +30,7 @@ test('one-shot runs to a log, background jobs stop with their children', async (
 });
 
 test('a later run stops the process group a lost run left behind', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-jobs-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-jobs-'));
     const lost = new Jobs(dir);
     const exited = new Promise<void>((resolve) => {
         lost.start('serve', 'sh -c "sleep 30" & sleep 30', dir, () => resolve());
@@ -50,7 +50,7 @@ async function until(check: () => boolean) {
 }
 
 test('one-shot commands are tracked and stopped during shutdown', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-one-shot-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-one-shot-'));
     const jobs = new Jobs(dir);
     try {
         const running = jobs.run('deploy', 'sleep 30', dir);
@@ -64,7 +64,7 @@ test('one-shot commands are tracked and stopped during shutdown', async () => {
 });
 
 test('stop escalates when the shell exits but a descendant ignores SIGTERM', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-stubborn-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-stubborn-'));
     const jobs = new Jobs(dir);
     const pidFile = join(dir, 'child.pid');
     const script = join(dir, 'child.cjs');
@@ -92,7 +92,7 @@ test('stop escalates when the shell exits but a descendant ignores SIGTERM', asy
 });
 
 test('duplicate job names cannot replace tracked process ownership', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'conductor-job-name-'));
+    const dir = mkdtempSync(join(tmpdir(), 'telebaton-job-name-'));
     const jobs = new Jobs(dir);
     try {
         const job = jobs.start('serve', 'sleep 30', dir, () => {});
