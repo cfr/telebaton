@@ -5,8 +5,8 @@ export interface PlanItem {
 }
 
 export function taskRange(items: PlanItem[], range: string): PlanItem[] {
-    const match = /^(\d{4})\.\.(\d{4})$/.exec(range);
-    if (!match) throw new Error('use /next [agent] NNNN..NNNN for an inclusive task range');
+    const match = /^(\d{1,4})(?:-|\.{2,3})(\d{1,4})$/.exec(range);
+    if (!match) throw new Error('use /next [agent] 311-313, 0311..0313 or 0311...0313 for an inclusive task range');
     const first = Number(match[1]), last = Number(match[2]);
     if (first > last) throw new Error('task range must be ascending');
     const selected: PlanItem[] = [];

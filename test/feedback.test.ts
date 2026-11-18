@@ -8,7 +8,7 @@ import type { TurnResult } from '../src/agents/types.ts';
 // Exercise the feedback transition without Telegram, git, or live model turns.
 interface FeedbackHarness {
     store: { state: State; save(): void };
-    chat: { send(text: string): Promise<void> };
+    notifications: { send(text: string): Promise<void> };
     project: { prompts: { feedbackFix: string } };
     afterFeedback(report: string): Promise<void>;
     afterTurn(role: Role, result: TurnResult, from: undefined, attempt: number): Promise<void>;
@@ -27,7 +27,7 @@ function fixture(retry: TurnResult) {
     const snapshots: State[] = [];
     const telebaton = Object.create(Telebaton.prototype) as FeedbackHarness;
     telebaton.store = { state, save() { snapshots.push(structuredClone(state)); } };
-    telebaton.chat = { async send(text) { notices.push(text); } };
+    telebaton.notifications = { async send(text) { notices.push(text); } };
     telebaton.project = { prompts: { feedbackFix: 'Fix the valid findings:\n{findings}' } };
     telebaton.afterSettledCheck = async (why) => { settled.push(why); };
     telebaton.turn = async (role, text) => {

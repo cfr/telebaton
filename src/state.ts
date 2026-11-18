@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import type { PendingWorkState, TurnResult } from './agents/types.ts';
 import type { Role, SessionRole } from './config.ts';
 import type { PlanItem } from './plan.ts';
+import type { Notification } from './notifications.ts';
 
 export interface SessionRef {
     agent: string;
@@ -54,6 +55,15 @@ export interface State {
     focus?: Role;
     sessions: Partial<Record<SessionRole, SessionRef>>;
     lastGate?: GateRecord;
+    gateContinuation?: {
+        task: string;
+        role: 'implement' | 'review';
+        session: string;
+        gate: GateRecord;
+        feedbackRound?: number;
+        feedbackSession?: string;
+    };
+    notifications?: Notification[];
     planTopic?: string;
     // feedback checks run for the current task, and whether the implementer is answering one
     feedbackRound?: number;

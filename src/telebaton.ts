@@ -29,20 +29,23 @@ import type { SessionRef, State, Store } from './state.ts';
 import { describeError, type Messenger } from './telegram.ts';
 import { defaultRoles, editRoleDefaults, onlyRoleChanges, swapRoleDefaults } from './roles.ts';
 import { AgentLimits } from './limits.ts';
+import { NotificationOutbox } from './notifications.ts';
 
 type Busy = Role | 'gate' | `/${string}` | null;
 
 const roles: readonly string[] = ['implement', 'feedback', 'review', 'plan'];
 
 const help = `/next [agent] [id] - start the next PLAN item (or a given one)
-/next [agent] NNNN..NNNN - run an inclusive task range; /next resumes, /next cancel clears the queue
+/next [agent] 311-313 (or 0311..0313, 0311...0313) - run an inclusive task range; /next resumes, /next cancel clears the queue
 /review [agent] [id] - review the current task (or a task done outside Telebaton)
 /fix [notes] - reviewer applies fixes and commits
 /feedback [agent] - run a feedback check of the current task now (one more round)
 /skip - skip the current feedback step, then continue or finish
 /continue [role] [notes] - resume a turn that stopped early (error, /stop, restart)
 /gate - run the gate on the current session's commits now, then continue as after a turn
+/recover - resume a saved successful gate and retry pending notifications
 /todo [id] - list PLAN.md "Next" items (or show one in full)
+/queue - list remaining queued tasks
 /plan [agent] [topic] - planning discussion (edits PLAN.md only)
 /chat [new] [agent] <message> - read-only chat about the project, alongside running work
 /chat stop - close the chat session (its log stays)
@@ -92,11 +95,13 @@ export class Telebaton {
     private local: LocalConfig;
     private store: Store;
     private chat: Messenger;
+    private notifications: NotificationOutbox;
 
     constructor(local: LocalConfig, store: Store, chat: Messenger) {
         this.local = local;
         this.store = store;
         this.chat = chat;
+        this.notifications = new NotificationOutbox(store, chat);
         this.project = loadProjectConfig(local.project);
         this.adapters = { opencode: new OpencodeAdapter(local.opencodeUrl), claude: new ClaudeAdapter(), codex: new CodexAdapter(join(dirname(local.stateFile), 'codex')) };
         this.jobs = new Jobs(join(dirname(local.stateFile), 'commands'));
@@ -115,8 +120,10 @@ export class Telebaton {
         chat.command('skip', () => this.skipFeedback());
         chat.command('continue', (a) => this.continueTurn(a));
         chat.command('gate', () => this.gateCommand());
+        chat.command('recover', () => this.recoverWorkflow());
         chat.command('plan', (a) => this.plan(a));
         chat.command('todo', (a) => this.todo(a));
+        chat.command('queue', () => this.queue());
         chat.command('chat', (a) => this.chatCommand(a));
         chat.command('summary', (a) => this.summary(a));
         chat.command('agents', async () => { this.reload(); await chat.send(this.agentList()); });
@@ -249,6 +256,7 @@ export class Telebaton {
 
     async shutdown() {
         this.shuttingDown = true;
+        this.notifications.close();
         if (this.workPoll) clearInterval(this.workPoll);
         this.workPoll = undefined;
         await Promise.all([this.jobs.stopAll(), ...Object.values(this.adapters).map((a) => a.shutdown?.())]);
@@ -310,7 +318,7 @@ export class Telebaton {
                 const labels = q.choices.map((c) => c.label);
                 const a = await this.chat.ask(lines.join('\n'), labels, q.allowText);
                 if (!labels.includes(a)) {
-                    await this.chat.send(`${this.prefix(role)} working…`, role);
+                    await this.notifications.send(`${this.prefix(role)} working…`, role);
                 }
                 return a;
             },
@@ -390,8 +398,11 @@ export class Telebaton {
         this.busy = what;
     }
 
-    private requireIdleFlow() {
+    private requireIdleFlow(allowCheckpoint = false) {
         if (this.flowing) throw new Error('task flow is still running; wait for it to settle');
+        if (!allowCheckpoint && this.state.gateContinuation) {
+            throw new Error('a successful gate has pending workflow steps; /recover to resume or /gate to verify again');
+        }
     }
 
     private parseArgs(args: string): { agent?: string; id?: string; rest: string } {
@@ -399,7 +410,7 @@ export class Telebaton {
         let agent: string | undefined;
         let id: string | undefined;
         while (words.length) {
-            if (!id && /^\d{4}/.test(words[0])) {
+            if (!id && /^(?:\d{4}|\d{1,4}(?:\.{2,3}|-)\d)/.test(words[0])) {
                 id = words.shift();
             } else if (!agent && this.project.agents.has(words[0])) {
                 agent = words.shift();
@@ -414,7 +425,7 @@ export class Telebaton {
         if (args.trim() === 'cancel') {
             this.state.taskQueue = undefined;
             this.store.save();
-            await this.chat.send('task queue cleared; the current task is unchanged');
+            await this.notifications.send('task queue cleared; the current task is unchanged');
             return;
         }
         this.requireIdleFlow();
@@ -432,7 +443,7 @@ export class Telebaton {
         const agent = this.agent(agentName);
         const plan = readFileSync(join(this.project.root, 'PLAN.md'), 'utf8');
         const items = parseNext(plan);
-        if (id?.includes('..')) {
+        if (id && (id.includes('..') || /^\d{1,4}-\d+$/.test(id))) {
             if (this.taskInProgress()) throw new Error('finish the current task before starting a task range');
             const selected = taskRange(items, id);
             this.claim('implement');
@@ -457,7 +468,7 @@ export class Telebaton {
             item = items[0];
         }
         if (!item) {
-            await this.chat.send(id ? `no PLAN item ${id}` : emptyNextMessage(plan));
+            await this.notifications.send(id ? `no PLAN item ${id}` : emptyNextMessage(plan));
             return;
         }
         this.claim('implement');
@@ -509,7 +520,7 @@ export class Telebaton {
                 if (!queue.ids.length) {
                     this.state.taskQueue = undefined;
                     this.store.save();
-                    await this.chat.send('task range complete');
+                    await this.notifications.send('task range complete');
                     return;
                 }
                 const items = parseNext(readFileSync(join(this.project.root, 'PLAN.md'), 'utf8'));
@@ -543,6 +554,19 @@ export class Telebaton {
         await this.chat.send(items.length ? items.map(summary).join('\n\n') : emptyNextMessage(plan));
     }
 
+    private async queue() {
+        const ids = this.state.taskQueue?.ids ?? [];
+        if (!ids.length) {
+            await this.chat.send('task queue is empty');
+            return;
+        }
+        const items = parseNext(readFileSync(join(this.project.root, 'PLAN.md'), 'utf8'));
+        await this.chat.send(ids.map((id) => {
+            const item = items.find((item) => item.id === id);
+            return item ? summary(item) : `${id}: no longer in PLAN.md "Next"`;
+        }).join('\n\n'));
+    }
+
     private vars(extra: Record<string, string> = {}): Record<string, string> {
         const base = (this.state.sessions.implement?.startSha ?? '').slice(0, 7);
         return { id: this.state.task?.id ?? '', num: this.state.task?.number ?? '', base, ...extra };
@@ -554,7 +578,7 @@ export class Telebaton {
         const { agent, id } = this.parseArgs(args);
         const reviewer = agent ?? this.project.roles.review;
         if (!reviewer) {
-            await this.chat.send('automatic review is disabled; use /review <agent> for a manual review');
+            await this.notifications.send('automatic review is disabled; use /review <agent> for a manual review');
             return;
         }
         if (id && id !== this.state.task?.id && idNumber(id) !== this.state.task?.number) {
@@ -564,7 +588,7 @@ export class Telebaton {
             this.adoptTask(id);
         }
         if (!this.state.task) {
-            await this.chat.send('no current task; /next, or /review <id> for work done outside');
+            await this.notifications.send('no current task; /next, or /review <id> for work done outside');
             return;
         }
         await this.startReview(reviewer);
@@ -613,10 +637,10 @@ export class Telebaton {
         return this.feedbackAgentAt(this.state.feedbackRound ?? 0);
     }
 
-    private async afterImplementGate() {
+    private async afterImplementGate(freshPrompt = false) {
         const next = this.nextFeedbackAgent();
         if (next) {
-            await this.runFeedback(next);
+            await this.runFeedback(next, freshPrompt);
         } else {
             await this.finishFeedback();
         }
@@ -625,13 +649,14 @@ export class Telebaton {
     private async finishFeedback(why?: string) {
         this.requireSettledWork();
         if (this.project.roles.review) {
-            if (why) await this.chat.send(`${why}; on to the review`);
+            if (why) await this.notifications.send(`${why}; on to the review`);
             await this.startReview(this.project.roles.review);
             return;
         }
         this.state.taskComplete = true;
+        this.state.gateContinuation = undefined;
         this.store.save();
-        await this.chat.send(`${why ? `${why}; ` : ''}${this.state.task!.id} done; /next when ready`);
+        await this.notifications.send(`${why ? `${why}; ` : ''}${this.state.task!.id} done; /next when ready`);
         await this.advanceQueue();
     }
 
@@ -648,7 +673,7 @@ export class Telebaton {
         if (next) {
             this.state.feedbackRound = done;
             this.store.save();
-            await this.chat.send(`${why}; next check by ${this.agent(next).tag}`);
+            await this.notifications.send(`${why}; next check by ${this.agent(next).tag}`);
             await this.runFeedback(next, overridden);
             return;
         }
@@ -661,11 +686,11 @@ export class Telebaton {
         const { agent } = this.parseArgs(args);
         const name = agent ?? this.nextFeedbackAgent() ?? this.project.roles.feedback.at(-1);
         if (!name) {
-            await this.chat.send('no feedback agent: set roles.feedback in the project configuration, or /feedback <agent>');
+            await this.notifications.send('no feedback agent: set roles.feedback in the project configuration, or /feedback <agent>');
             return;
         }
         if (!this.state.task || !this.state.sessions.implement) {
-            await this.chat.send('no implementation to check; /next first');
+            await this.notifications.send('no implementation to check; /next first');
             return;
         }
         await this.runFeedback(name);
@@ -676,7 +701,7 @@ export class Telebaton {
         this.reload();
         const ref = this.state.sessions.feedback;
         if (!ref || this.state.focus !== 'feedback' || this.state.feedbackDispositionPending) {
-            await this.chat.send('no current feedback step to skip; implementation, repairs and final review cannot be skipped');
+            await this.notifications.send('no current feedback step to skip; implementation, repairs and final review cannot be skipped');
             return;
         }
         if (this.state.workConflict || (this.busy && this.busy !== 'feedback') ||
@@ -684,7 +709,7 @@ export class Telebaton {
             throw new Error('other work is running or unresolved; wait before skipping feedback');
         }
         if (ref.skipRequested) {
-            await this.chat.send('feedback skip already requested; waiting for its work to stop');
+            await this.notifications.send('feedback skip already requested; waiting for its work to stop');
             return;
         }
         if (ref.swapRequested) throw new Error('an agent handoff is pending; wait before skipping feedback');
@@ -692,7 +717,7 @@ export class Telebaton {
         this.store.save();
         this.stoppingWork++;
         try {
-            await this.chat.send(`skipping feedback by ${this.agent(ref.agent).tag}; stopping its work first`);
+            await this.notifications.send(`skipping feedback by ${this.agent(ref.agent).tag}; stopping its work first`);
             await this.interruptSession('feedback');
         } finally {
             this.stoppingWork--;
@@ -716,7 +741,7 @@ export class Telebaton {
         const next = this.nextFeedbackAgent();
         const why = `feedback step ${round} skipped by request`;
         if (next) {
-            await this.chat.send(`${why}; next check by ${this.agent(next).tag}`);
+            await this.notifications.send(`${why}; next check by ${this.agent(next).tag}`);
             await this.runFeedback(next, true);
         } else await this.finishFeedback(why);
     }
@@ -774,7 +799,7 @@ export class Telebaton {
             this.state.focus = 'feedback';
             if (this.state.feedbackReportRetried) {
                 this.store.save();
-                await this.chat.send(
+                await this.notifications.send(
                     `feedback: incomplete report after one retry${invalid ? ` (${invalid})` : ': no VERDICT'}; task flow paused. ` +
                     'Use /continue feedback to finish the report, /skip to skip this feedback step, /feedback <agent> for another check, ' +
                     'or /review to proceed to review.',
@@ -783,7 +808,7 @@ export class Telebaton {
             }
             this.state.feedbackReportRetried = true;
             this.store.save();
-            await this.chat.send('feedback: incomplete report; asking the checker to finish it once');
+            await this.notifications.send('feedback: incomplete report; asking the checker to finish it once');
             await this.turn(
                 'feedback',
                 `Finish the complete feedback report now. ${invalid ?? 'Your previous reply had no VERDICT line.'} ` +
@@ -815,7 +840,7 @@ export class Telebaton {
         this.store.save();
         if (!receipt.error) return true;
         if (retried) {
-            await this.chat.send(`finding answer pending: ${receipt.error}; task flow paused. Use /continue ${role} to complete dispositions.`);
+            await this.notifications.send(`finding answer pending: ${receipt.error}; task flow paused. Use /continue ${role} to complete dispositions.`);
             return false;
         }
         if (role === 'implement') this.state.feedbackDispositionRetried = true;
@@ -841,7 +866,7 @@ export class Telebaton {
             return;
         }
         if (ref.reportRetried) {
-            await this.chat.send(`review report pending: ${receipt.error}; use /continue review to finish the report.`);
+            await this.notifications.send(`review report pending: ${receipt.error}; use /continue review to finish the report.`);
             return;
         }
         ref.reportRetried = true;
@@ -873,7 +898,7 @@ export class Telebaton {
         const role = words[0] && roles.includes(words[0]) ? (words.shift() as Role) : this.state.focus;
         if (role !== 'plan') this.requireIdleFlow();
         if (!role || !this.state.sessions[role]) {
-            await this.chat.send(role ? `no ${role} session` : 'no session to continue');
+            await this.notifications.send(role ? `no ${role} session` : 'no session to continue');
             return;
         }
         const notes = words.join(' ');
@@ -885,7 +910,7 @@ export class Telebaton {
     private async fix(notes: string) {
         this.requireIdleFlow();
         if (!this.state.sessions.review) {
-            await this.chat.send('no review session; /review first');
+            await this.notifications.send('no review session; /review first');
             return;
         }
         if (this.busy) throw new Error(`busy: ${this.busy} is running (/status, /stop)`);
@@ -937,12 +962,12 @@ export class Telebaton {
 
     private async planDone() {
         if (!this.state.sessions.plan) {
-            await this.chat.send('no planning session; /plan first');
+            await this.notifications.send('no planning session; /plan first');
             return;
         }
         const running = this.runningTask();
         if (running) {
-            await this.chat.send(`${running} is running; /plan done writes PLAN.md once the task is idle`);
+            await this.notifications.send(`${running} is running; /plan done writes PLAN.md once the task is idle`);
             return;
         }
         const root = this.project.root;
@@ -952,16 +977,16 @@ export class Telebaton {
             return;
         }
         if ((await repo.fileDiff(root, 'PLAN.md')).trim()) {
-            await this.chat.send('PLAN.md changed but nothing was committed');
+            await this.notifications.send('PLAN.md changed but nothing was committed');
             return;
         }
         const kept = this.state.sessions.plan?.planCommits ?? [];
         const earlier = kept.length ? (await git(root, 'log', '--no-walk=unsorted', '--format=%h %s', ...kept)).trim() : '';
         if (!earlier) {
-            await this.chat.send('no commit; PLAN.md is unchanged');
+            await this.notifications.send('no commit; PLAN.md is unchanged');
             return;
         }
-        await this.chat.send(
+        await this.notifications.send(
             [
                 'nothing new to commit; this planning session already committed PLAN.md in:',
                 earlier,
@@ -983,7 +1008,7 @@ export class Telebaton {
         const root = this.project.root;
         const files = (await git(root, 'diff', '--name-only', before, 'HEAD')).split('\n').filter(Boolean);
         const others = files.filter((f) => f !== 'PLAN.md');
-        await this.chat.send(
+        await this.notifications.send(
             [
                 await repo.commitMessages(root, before),
                 ...(others.length ? ['', `warning: the commit also touches ${others.join(', ')}`] : []),
@@ -991,7 +1016,7 @@ export class Telebaton {
                 nextReport(readFileSync(join(root, 'PLAN.md'), 'utf8')),
             ].join('\n'),
         );
-        await this.chat.send('Use /diff <hash> to request a planning commit patch.');
+        await this.notifications.send('Use /diff <hash> to request a planning commit patch.');
         const commits = await repo.commitsSince(root, before);
         if ((await this.chat.ask('Keep the planning commit?', ['keep', 'undo commit'], false)) !== 'undo commit') {
             const kept = this.state.sessions.plan;
@@ -1001,12 +1026,12 @@ export class Telebaton {
             }
             const hint = this.nextHint();
             if (hint) {
-                await this.chat.send(hint);
+                await this.notifications.send(hint);
             }
             return;
         }
         if ((await repo.head(root)) !== commits[0]) {
-            await this.chat.send('HEAD moved since the planning commit; undo it by hand');
+            await this.notifications.send('HEAD moved since the planning commit; undo it by hand');
             return;
         }
         // --keep refuses instead of overwriting uncommitted changes to the same files
@@ -1016,7 +1041,7 @@ export class Telebaton {
             ref.checkedSha = before;
             this.store.save();
         }
-        await this.chat.send(`planning commit undone; HEAD is back at ${before.slice(0, 7)}`);
+        await this.notifications.send(`planning commit undone; HEAD is back at ${before.slice(0, 7)}`);
     }
 
     // the chat and the planning session run beside the tasks and outlive them
@@ -1071,12 +1096,12 @@ export class Telebaton {
             await this.createSession('chat', wanted, this.freshTitle(base, wanted));
             ref = this.state.sessions.chat!;
             if (!rest) {
-                await this.chat.send(`${this.prefix('chat')} new read-only chat; /chat <message> or reply to its messages`);
+                await this.notifications.send(`${this.prefix('chat')} new read-only chat; /chat <message> or reply to its messages`);
                 return;
             }
             rest = fill(this.project.prompts.chat, { message: rest });
         } else if (!rest) {
-            await this.chat.send(`${this.prefix('chat')} chat session ${ref.id}; /chat <message> or reply to its messages`);
+            await this.notifications.send(`${this.prefix('chat')} chat session ${ref.id}; /chat <message> or reply to its messages`);
             return;
         }
         await this.chatTurn(rest);
@@ -1098,7 +1123,7 @@ export class Telebaton {
         target ??= this.busy && roles.includes(this.busy) ? (this.busy as Role) : this.state.focus;
         const ref = target ? this.state.sessions[target] : undefined;
         if (!target || !ref) {
-            await this.chat.send(target ? `no ${target} session` : 'no session to summarize');
+            await this.notifications.send(target ? `no ${target} session` : 'no session to summarize');
             return;
         }
         if (this.summaryBusy) {
@@ -1109,12 +1134,12 @@ export class Telebaton {
             await this.exportLog(target);
             const log = this.state.sessions[target]?.logFile;
             if (!log) {
-                await this.chat.send(`${this.prefix(target)} has no transcript yet`);
+                await this.notifications.send(`${this.prefix(target)} has no transcript yet`);
                 return;
             }
             const agent = this.agent(agentName);
             const p = `[${agent.tag} summary]`;
-            await this.chat.send(`${p} reading the ${target} session (${ref.title})…`);
+            await this.notifications.send(`${p} reading the ${target} session (${ref.title})…`);
             const s = await this.adapters[agent.harness].create(agent, {
                 title: `${ref.title} summary`,
                 cwd: this.project.root,
@@ -1126,10 +1151,10 @@ export class Telebaton {
             const state = running ? 'still running' : 'idle (its last turn has ended)';
             const r = await s.send(fill(this.project.prompts.summary, { log, role: target, task, state }));
             if (r.text) {
-                await this.chat.sendMarkdown(p, r.text);
+                await this.notifications.sendMarkdown(p, r.text);
             }
             if (r.outcome !== 'succeeded') {
-                await this.chat.send(`${p} turn ${r.outcome}${r.error ? `: ${r.error}` : ''}`);
+                await this.notifications.send(`${p} turn ${r.outcome}${r.error ? `: ${r.error}` : ''}`);
             }
         } finally {
             this.summaryBusy = false;
@@ -1139,7 +1164,7 @@ export class Telebaton {
     private async closeChat() {
         const ref = this.state.sessions.chat;
         if (!ref) {
-            await this.chat.send('no chat session');
+            await this.notifications.send('no chat session');
             return;
         }
         const p = this.prefix('chat');
@@ -1149,12 +1174,12 @@ export class Telebaton {
                 await new Promise((r) => setTimeout(r, 100));
             }
         }
-        await this.exportLog('chat').catch((e: Error) => this.chat.send(`log export failed: ${e.message}`));
+        await this.exportLog('chat').catch((e: Error) => this.notifications.send(`log export failed: ${e.message}`));
         const log = this.state.sessions.chat?.logFile;
         delete this.state.sessions.chat;
         this.live.delete('chat');
         this.store.save();
-        await this.chat.sendHtml(`${escapeHtml(p)} chat closed${log ? `; log: ${code(log)}` : ''}`);
+        await this.notifications.sendHtml(`${escapeHtml(p)} chat closed${log ? `; log: ${code(log)}` : ''}`);
     }
 
     private async chatTurn(text: string) {
@@ -1164,14 +1189,14 @@ export class Telebaton {
         this.chatBusy = true;
         try {
             const p = this.prefix('chat');
-            await this.chat.send(`${p} thinking…`, 'chat');
+            await this.notifications.send(`${p} thinking…`, 'chat');
             const r = await this.session('chat').send(text);
-            await this.exportLog('chat').catch((e: Error) => this.chat.send(`log export failed: ${e.message}`));
+            await this.exportLog('chat').catch((e: Error) => this.notifications.send(`log export failed: ${e.message}`));
             if (r.text) {
-                await this.chat.sendMarkdown(p, r.text, 'chat');
+                await this.notifications.sendMarkdown(p, r.text, 'chat');
             }
             if (r.outcome !== 'succeeded') {
-                await this.chat.send(`${p} turn ${r.outcome}${r.error ? `: ${r.error}` : ''}`, 'chat');
+                await this.notifications.send(`${p} turn ${r.outcome}${r.error ? `: ${r.error}` : ''}`, 'chat');
             }
         } finally {
             this.chatBusy = false;
@@ -1186,7 +1211,7 @@ export class Telebaton {
         const role = route ?? this.state.focus;
         if (role !== 'plan') this.requireIdleFlow();
         if (!role || !this.state.sessions[role]) {
-            await this.chat.send('no session to talk to; /next, /review or /plan');
+            await this.notifications.send('no session to talk to; /next, /review or /plan');
             return;
         }
         await this.turn(role, text, 'working', 0, false);
@@ -1195,7 +1220,7 @@ export class Telebaton {
     private detach(p: Promise<void>) {
         p.catch((e: unknown) => {
             console.error('error:', describeError(e));
-            this.chat.send(`error: ${describeError(e)}`).catch(() => {});
+            this.notifications.send(`error: ${describeError(e)}`).catch(() => {});
         });
     }
 
@@ -1218,7 +1243,7 @@ export class Telebaton {
                 this.store.save();
                 text = await this.feedbackTracker.prompt(role, text);
                 const head = `${this.prefix(role)} ${doing}…`;
-                await (quote ? this.chat.sendQuoted(head, text, role) : this.chat.send(head, role));
+                await (quote ? this.notifications.sendQuoted(head, text, role) : this.notifications.send(head, role));
                 this.markTurn(role, { since: Date.now(), doing, gateAttempt });
                 r = await this.session(role).send(text);
                 if (handoff) { this.state.sessions[role]!.handoff = undefined; this.store.save(); }
@@ -1281,7 +1306,7 @@ export class Telebaton {
             this.store.save();
             const message = [...notes, text].join('\n\n');
             const line = `${this.prefix('plan')} ${doing}${running ? ' (read-only while the task runs)' : ''}…`;
-            await (quote ? this.chat.sendQuoted(line, message, 'plan') : this.chat.send(line, 'plan'));
+            await (quote ? this.notifications.sendQuoted(line, message, 'plan') : this.notifications.send(line, 'plan'));
             this.markTurn('plan', { since: Date.now(), doing });
             const session = this.session('plan');
             await session.setReadOnly(running !== undefined);
@@ -1307,7 +1332,7 @@ export class Telebaton {
         }
         if (role === 'feedback') {
             if (this.state.workConflict) {
-                await this.chat.send(`${this.state.workConflict}; feedback is stale. Wait for pending work, then /gate.`);
+                await this.notifications.send(`${this.state.workConflict}; feedback is stale. Wait for pending work, then /gate.`);
                 return;
             }
             if (this.state.sessions.feedback?.skipRequested) {
@@ -1349,7 +1374,7 @@ export class Telebaton {
             }
         }
         if (role !== 'plan' && this.state.workConflict) {
-            await this.chat.send(`${this.state.workConflict}; automatic flow paused. Wait for pending work, then /gate.`);
+            await this.notifications.send(`${this.state.workConflict}; automatic flow paused. Wait for pending work, then /gate.`);
             return;
         }
         if (gateFrom !== undefined) {
@@ -1375,7 +1400,10 @@ export class Telebaton {
         const ref = this.state.sessions[role];
         if (ref && (turn || ref.turn)) {
             ref.turn = turn;
-            if (turn) ref.failureNotice = undefined;
+            if (turn) {
+                ref.failureNotice = undefined;
+                if (role !== 'plan') this.state.gateContinuation = undefined;
+            }
             this.store.save();
         }
     }
@@ -1385,7 +1413,7 @@ export class Telebaton {
         if (!ref || result.outcome === 'succeeded' || ref.skipRequested || ref.swapRequested) return;
         const notice = `turn ${result.outcome}${result.error ? `: ${result.error}` : ''}`;
         if (ref.failureNotice === notice) return;
-        await this.chat.send(`${this.prefix(role)} ${notice}; /continue ${role} to resume it`, role);
+        await this.notifications.send(`${this.prefix(role)} ${notice}; /continue ${role} to resume it`, role);
         ref.failureNotice = notice;
         this.store.save();
     }
@@ -1425,24 +1453,24 @@ export class Telebaton {
             try {
                 st = await this.session(role).turnState(since);
             } catch (e) {
-                await this.chat.send(`${p} could not check ${what}: ${describeError(e)}`, role);
+                await this.notifications.send(`${p} could not check ${what}: ${describeError(e)}`, role);
                 continue;
             }
             if (st.running) {
-                await this.chat.send(`${p} ${what} is still running; its end is handled as usual`, role);
+                await this.notifications.send(`${p} ${what} is still running; its end is handled as usual`, role);
                 continue;
             }
-            await this.chat.send(`${p} ${what} ended while Telebaton was down`, role);
+            await this.notifications.send(`${p} ${what} ended while Telebaton was down`, role);
             await this.unsolicited(ref.id, { phase: 'ended', outcome: st.outcome, error: st.error });
         }
     }
 
     // `from`: the commit before the session's new commits, when it committed since it was last checked.
     private async settle(role: Role, r: TurnResult, readOnly = false, postReply = true): Promise<{ waiting: boolean; from?: string }> {
-        await this.exportLog(role).catch((e: Error) => this.chat.send(`log export failed: ${e.message}`));
+        await this.exportLog(role).catch((e: Error) => this.notifications.send(`log export failed: ${e.message}`));
         const p = this.prefix(role);
         if (r.text && postReply) {
-            await this.chat.sendMarkdown(p, r.text, role);
+            await this.notifications.sendMarkdown(p, r.text, role);
         }
         await this.notifyTurnFailure(role, r);
         let detail: string;
@@ -1462,7 +1490,7 @@ export class Telebaton {
                 result: r, readOnly, gateAttempt: old?.gateAttempt ?? ref.turn?.gateAttempt ?? 0, detail };
             this.store.save();
             this.watchWork();
-            if (old?.detail !== detail) await this.chat.send(`${p} waiting for pending work before advancing:\n${detail}`, role);
+            if (old?.detail !== detail) await this.notifications.send(`${p} waiting for pending work before advancing:\n${detail}`, role);
             return { waiting: true };
         }
         if (this.state.sessions[role]?.workWait) {
@@ -1486,7 +1514,7 @@ export class Telebaton {
             await this.checkPlanOnly();
         }
         if (role === 'feedback' && committed) {
-            await this.chat.send(`warning: the feedback check committed (it should only report):\n${await repo.commitMessages(root, from)}`);
+            await this.notifications.send(`warning: the feedback check committed (it should only report):\n${await repo.commitMessages(root, from)}`);
         }
         return { waiting: false, from: committed ? from : undefined };
     }
@@ -1507,14 +1535,14 @@ export class Telebaton {
                     pendingWorkState: retired.ref.pendingWorkState,
                 });
                 await session.interrupt();
-                await this.chat.send(`${this.state.workConflict}; stopped it. /gate to verify the current tree before advancing.`);
+                await this.notifications.send(`${this.state.workConflict}; stopped it. /gate to verify the current tree before advancing.`);
             }
             return;
         }
         if (found === 'chat') {
             if (ev.phase === 'ended' && !this.chatBusy) {
                 await this.exportLog('chat');
-                await this.chat.sendMarkdown(this.prefix('chat'), await this.session('chat').lastReply(), 'chat');
+                await this.notifications.sendMarkdown(this.prefix('chat'), await this.session('chat').lastReply(), 'chat');
             }
             return;
         }
@@ -1533,7 +1561,7 @@ export class Telebaton {
             this.store.save();
             this.watchWork();
             const clash = this.busy && this.busy !== role ? `; warning: ${this.busy} is running too, so two agents are in the tree` : '';
-            await this.chat.send(`${p} resumed on its own (e.g. a background job finished)…${clash}`, role);
+            await this.notifications.send(`${p} resumed on its own (e.g. a background job finished)…${clash}`, role);
             return;
         }
         const ref = this.state.sessions[role]!;
@@ -1579,7 +1607,7 @@ export class Telebaton {
                 if (wait.detail !== detail) {
                     wait.detail = detail;
                     this.store.save();
-                    await this.chat.send(`${this.prefix(role)} waiting for pending work:\n${detail}`, role);
+                    await this.notifications.send(`${this.prefix(role)} waiting for pending work:\n${detail}`, role);
                 }
                 return;
             }
@@ -1593,7 +1621,7 @@ export class Telebaton {
             const ref = this.state.sessions[role];
             if (!ref?.workWait) throw e;
             const detail = `pending-work status unknown: ${describeError(e)}`;
-            if (ref.workWait.detail !== detail) await this.chat.send(`${this.prefix(role)} ${detail}`, role);
+            if (ref.workWait.detail !== detail) await this.notifications.send(`${this.prefix(role)} ${detail}`, role);
             ref.workWait.detail = detail;
             this.store.save();
         } finally {
@@ -1603,16 +1631,66 @@ export class Telebaton {
         }
     }
 
+    private async recoverWorkflow() {
+        void this.notifications.flush();
+        this.requireIdleFlow(true);
+        this.requireSettledWork();
+        if (this.busy || this.recoveringWork || this.shuttingDown) throw new Error('workflow is busy or shutting down');
+        this.reload();
+        let checkpoint = this.state.gateContinuation;
+        // Older versions saved the gate before notifying, leaving repair state behind on delivery failure.
+        if (!checkpoint && this.state.feedbackFixing && !this.state.feedbackDispositionPending &&
+            !this.state.taskComplete && this.state.task && this.state.focus === 'implement' &&
+            this.state.sessions.implement && this.state.lastGate?.ok) {
+            checkpoint = {
+                task: this.state.task.id, role: 'implement', session: this.state.sessions.implement.id,
+                gate: this.state.lastGate, feedbackRound: this.state.feedbackRound,
+                feedbackSession: this.state.sessions.feedback?.id,
+            };
+        }
+        if (!checkpoint) {
+            await this.notifications.send('no saved gate transition to recover; pending notifications will be retried');
+            return;
+        }
+        this.flowing++;
+        try {
+            const ref = this.state.sessions[checkpoint.role];
+            if (checkpoint.task !== this.state.task?.id || ref?.id !== checkpoint.session || this.state.taskComplete) {
+                throw new Error('saved gate belongs to another task or session; /gate to verify the current work');
+            }
+            const gate = checkpoint.gate;
+            if (!gate.ok || !this.state.lastGate?.ok || this.state.lastGate.at !== gate.at ||
+                gate.sha !== await repo.head(this.project.root) || await repo.status(this.project.root) ||
+                JSON.stringify(gate.commands) !== JSON.stringify(this.project.gate.map((step) => step.cmd))) {
+                throw new Error('saved gate is stale or the worktree changed; /gate to verify before advancing');
+            }
+            for (const role of ['implement', 'feedback', 'review'] as const) {
+                const session = this.state.sessions[role];
+                if (session && (session.turn || (await this.session(role).pendingWork()).length)) {
+                    throw new Error(`${role} has unfinished work; settle it before recovering the gate`);
+                }
+            }
+            this.state.gateContinuation = checkpoint;
+            this.state.focus = checkpoint.role;
+            this.state.feedbackRound = checkpoint.feedbackRound;
+            this.store.save();
+            const freshPrompt = this.state.sessions.feedback?.id !== checkpoint.feedbackSession;
+            await this.notifications.send(`resuming workflow after the successful gate at ${gate.sha.slice(0, 7)}`);
+            await this.advanceAfterGate(checkpoint.role, freshPrompt);
+        } finally { this.flowing--; }
+    }
+
     private async gateCommand() {
-        this.requireIdleFlow();
-        const role = this.state.focus;
+        this.requireIdleFlow(true);
+        const checkpoint = this.state.gateContinuation;
+        const role = checkpoint?.role ?? this.state.focus;
         const ref = role ? this.state.sessions[role] : undefined;
         if (!role || !ref || role === 'plan' || role === 'feedback') {
-            await this.chat.send('no implementation or review session to gate');
+            await this.notifications.send('no implementation or review session to gate');
             return;
         }
         if ((role === 'implement' && this.state.feedbackDispositionPending) || ref.dispositionPending) {
-            await this.chat.send(`finding dispositions are pending; use /continue ${role} before /gate`);
+            await this.notifications.send(`finding dispositions are pending; use /continue ${role} before /gate`);
             return;
         }
         const waiting = this.waitingRole();
@@ -1624,10 +1702,14 @@ export class Telebaton {
         try {
             const root = this.project.root;
             if ((await repo.commitsSince(root, ref.startSha)).length === 0) {
-                await this.chat.send(`${this.prefix(role)} has no commits since its session started`);
+                await this.notifications.send(`${this.prefix(role)} has no commits since its session started`);
                 return;
             }
             ref.checkedSha = await repo.head(root);
+            if (checkpoint && checkpoint.task === this.state.task?.id && checkpoint.session === ref.id) {
+                this.state.feedbackRound = checkpoint.feedbackRound;
+                this.state.focus = role;
+            }
             this.store.save();
             await this.gate(role, ref.startSha, 0);
         }
@@ -1641,16 +1723,17 @@ export class Telebaton {
             .filter(Boolean)
             .filter((l) => !l.endsWith(' PLAN.md'));
         if (others.length) {
-            await this.chat.send(`warning: the planning session touched more than PLAN.md:\n${others.join('\n')}`);
+            await this.notifications.send(`warning: the planning session touched more than PLAN.md:\n${others.join('\n')}`);
         }
     }
 
     private async gate(role: Role, before: string, attempt: number) {
+        const checkpoint = this.state.gateContinuation;
         const root = this.project.root;
         this.claim('gate');
         let g: repo.GateResult;
         try {
-            await this.chat.send(`gate: running ${this.project.gate.map((s) => s.name).join(' + ')}…`);
+            await this.notifications.send(`gate: running ${this.project.gate.map((s) => s.name).join(' + ')}…`);
             g = await repo.runGate(root, this.project.gate);
         } finally {
             this.busy = null;
@@ -1664,15 +1747,21 @@ export class Telebaton {
         const gateEntry = `${JSON.stringify(record)}\n${g.log}\n`;
         writeFileSync(gateFile, (existsSync(gateFile) ? readFileSync(gateFile, 'utf8') : '') + gateEntry);
         this.state.lastGate = record;
+        if (g.ok && (role === 'implement' || role === 'review')) {
+            this.state.gateContinuation = {
+                task: this.state.task!.id, role, session: this.state.sessions[role]!.id,
+                gate: record, feedbackRound: this.state.feedbackRound,
+                feedbackSession: this.state.sessions.feedback?.id,
+            };
+        } else this.state.gateContinuation = undefined;
         this.store.save();
-        const task = this.state.task;
         if (!g.ok) {
-            await this.chat.sendLog(`gate failed at ${g.failedStep} (${g.seconds.toFixed(0)} s); log: ${gateFile}`, tail(g.log, 60));
+            await this.notifications.sendLog(`gate failed at ${g.failedStep} (${g.seconds.toFixed(0)} s); log: ${gateFile}`, tail(g.log, 60));
             if (attempt === 0) {
                 const text = fill(this.project.prompts.gateFailed, this.vars({ step: g.failedStep ?? '', output: tail(g.log, 60) }));
                 await this.turn(role, text, `fixing the gate failure`, 1);
             } else {
-                await this.chat.send('gate failed twice; waiting for you (plain text to the agent, or fix it yourself and /review)');
+                await this.notifications.send('gate failed twice; waiting for you (plain text to the agent, or fix it yourself and /review)');
             }
             return;
         }
@@ -1685,7 +1774,7 @@ export class Telebaton {
         const messages = await repo.commitMessages(root, from);
         const stat = await repo.diffStat(root, from);
         const dirty = await repo.status(root);
-        await this.chat.send(
+        await this.notifications.send(
             [
                 `gate passed (${g.seconds.toFixed(0)} s) at ${sha.slice(0, 7)}`,
                 '',
@@ -1695,6 +1784,10 @@ export class Telebaton {
                 ...(dirty ? ['', `uncommitted:\n${dirty}`] : []),
             ].join('\n'),
         );
+        await this.advanceAfterGate(role, !!checkpoint && this.state.sessions.feedback?.id !== checkpoint.feedbackSession);
+    }
+
+    private async advanceAfterGate(role: Role, freshPrompt = false) {
         if (role === 'implement') {
             this.state.feedbackFindingIds = undefined;
             this.state.feedbackFixBase = undefined;
@@ -1702,15 +1795,16 @@ export class Telebaton {
             this.state.feedbackDispositionPending = undefined;
             this.state.feedbackFixing = undefined;
             this.store.save();
-            await this.afterImplementGate();
+            await this.afterImplementGate(freshPrompt);
         } else if (role === 'review') {
             const ref = this.state.sessions.review!;
             ref.fixingFindings = undefined;
             ref.dispositionPending = undefined;
             ref.findingIds = undefined;
             this.state.taskComplete = true;
+            this.state.gateContinuation = undefined;
             this.store.save();
-            await this.chat.send(`${task?.id ?? 'task'} done; /next when ready`);
+            await this.notifications.send(`${this.state.task?.id ?? 'task'} done; /next when ready`);
             await this.advanceQueue();
         }
     }
@@ -1793,7 +1887,7 @@ export class Telebaton {
         if (this.state.task && existsSync(join(dirname(this.local.stateFile), 'findings', `${this.state.task.id}.json`))) {
             done.push(this.feedbackTracker.export());
         }
-        await this.chat.sendHtml(done.length ? `exported:\n${done.map(code).join('\n')}` : 'no sessions');
+        await this.notifications.sendHtml(done.length ? `exported:\n${done.map(code).join('\n')}` : 'no sessions');
     }
 
     private async stop(args = '') {
@@ -1801,42 +1895,42 @@ export class Telebaton {
         if (!args && this.state.taskQueue) {
             this.state.taskQueue.paused = true;
             this.store.save();
-            await this.chat.send('task queue paused; finish the current task, then /next to resume, or /next cancel');
+            await this.notifications.send('task queue paused; finish the current task, then /next to resume, or /next cancel');
         }
         if (args === 'chat') {
             if (this.chatBusy) {
                 await this.interruptSession('chat');
-                await this.chat.send(`interrupt sent to ${this.prefix('chat')}`);
+                await this.notifications.send(`interrupt sent to ${this.prefix('chat')}`);
             }
-            else await this.chat.send('chat is not running');
+            else await this.notifications.send('chat is not running');
             return;
         }
         if (args === 'plan') {
             if (this.planBusy || this.state.sessions.plan?.workWait) {
                 await this.interruptSession('plan');
-                await this.chat.send(`interrupt sent to ${this.prefix('plan')}`);
+                await this.notifications.send(`interrupt sent to ${this.prefix('plan')}`);
             }
-            else await this.chat.send('plan is not running');
+            else await this.notifications.send('plan is not running');
             return;
         }
         const busy = this.busy ?? this.waitingRole();
         if (this.chatBusy && !busy) {
             await this.interruptSession('chat');
-            await this.chat.send(`interrupt sent to ${this.prefix('chat')}`);
+            await this.notifications.send(`interrupt sent to ${this.prefix('chat')}`);
             return;
         }
         if (this.planBusy && (!busy || busy === 'plan')) {
             await this.interruptSession('plan');
-            await this.chat.send(`interrupt sent to ${this.prefix('plan')}`);
+            await this.notifications.send(`interrupt sent to ${this.prefix('plan')}`);
             return;
         }
         if (!busy || !roles.includes(busy)) {
-            await this.chat.send(busy ? `${busy} is running; it cannot be stopped yet` : 'nothing is running');
+            await this.notifications.send(busy ? `${busy} is running; it cannot be stopped yet` : 'nothing is running');
             return;
         }
         const role = busy as Role;
         await this.interruptSession(role);
-        await this.chat.send(`interrupt sent to ${this.prefix(role)}`);
+        await this.notifications.send(`interrupt sent to ${this.prefix(role)}`);
     }
 
     private async interruptSession(role: SessionRole) {
@@ -1927,13 +2021,13 @@ export class Telebaton {
                 throw new Error(`${configName} already has uncommitted changes outside role defaults; commit or discard those first`);
             }
             if (proposal === original && !(await repo.fileDiff(root, configName)).trim()) {
-                await this.chat.send('role defaults are unchanged');
+                await this.notifications.send('role defaults are unchanged');
                 return;
             }
             if (readFileSync(file, 'utf8') !== original) throw new Error(`${configName} changed; retry ${command}`);
             writeFileSync(file, proposal);
             this.reload();
-            await this.chat.sendLog(this.roleList(), await repo.fileDiff(root, configName));
+            await this.notifications.sendLog(this.roleList(), await repo.fileDiff(root, configName));
             const choice = await this.chat.ask('Keep the role changes?', ['commit', 'keep', 'discard'], false);
             if (readFileSync(file, 'utf8') !== proposal) throw new Error(`${configName} changed during confirmation; left it untouched`);
             if (choice === 'discard') writeFileSync(file, original);
@@ -1944,7 +2038,7 @@ export class Telebaton {
                     '-m', 'Co-Authored-By: Codex <noreply@openai.com>', '--', configName);
             }
             this.reload();
-            await this.chat.send(choice === 'discard' ? 'role changes discarded' : choice === 'commit'
+            await this.notifications.send(choice === 'discard' ? 'role changes discarded' : choice === 'commit'
                 ? `role changes committed as ${(await repo.head(root)).slice(0, 7)}` : 'role changes kept uncommitted');
         } finally { this.busy = null; }
     }
@@ -1957,7 +2051,7 @@ export class Telebaton {
         const role = this.state.focus;
         const ref = role ? this.state.sessions[role] : undefined;
         if (!this.taskInProgress() || !role || !ref) throw new Error('no task in progress with a focused session to swap');
-        if (target.name === ref.agent) { await this.chat.send(`${role} already uses ${target.name}`); return; }
+        if (target.name === ref.agent) { await this.notifications.send(`${role} already uses ${target.name}`); return; }
         if (this.state.workConflict || ref.skipRequested || (this.busy && this.busy !== role) ||
             (this.waitingRole() && this.waitingRole() !== role) || (this.planBusy && role !== 'plan')) {
             throw new Error('other work or a conflicting transition is pending; wait before swapping agents');
@@ -1968,7 +2062,7 @@ export class Telebaton {
         this.store.save();
         this.stoppingWork++;
         try {
-            await this.chat.send(`handing ${role} from ${ref.agent} to ${target.name}; stopping the old session first`);
+            await this.notifications.send(`handing ${role} from ${ref.agent} to ${target.name}; stopping the old session first`);
             await this.interruptSession(role);
         } finally { this.stoppingWork--; }
         if (this.state.sessions[role] !== ref || this.busy === role || (role === 'plan' && this.planBusy)) return;
@@ -2024,7 +2118,7 @@ export class Telebaton {
                 ref: { ...old, swapRequested: undefined, workWait: undefined, turn: undefined }, to: target, at: new Date().toISOString() });
             this.store.save();
             swapped = true;
-            await this.chat.send(`${role}: ${ref.originalAgent} -> ${target}. Handoff prepared; /continue ${role} to resume. Defaults unchanged.`);
+            await this.notifications.send(`${role}: ${ref.originalAgent} -> ${target}. Handoff prepared; /continue ${role} to resume. Defaults unchanged.`);
         } catch (e) {
             if (!swapped) {
                 this.state.sessions[role] = old;
@@ -2062,6 +2156,8 @@ export class Telebaton {
             `focus: ${s.focus ?? '-'}${this.chatBusy ? ' (chat answering)' : ''}`,
             ...(s.taskQueue ? [`task queue${s.taskQueue.paused ? ' (paused)' : ''}: ${escapeHtml(s.taskQueue.ids.join(', ') || 'last task in progress')}`] : []),
             ...(s.workConflict ? [`verification required: ${escapeHtml(s.workConflict)}`] : []),
+            ...(s.gateContinuation ? ['workflow recovery pending; /recover to resume from the saved gate'] : []),
+            ...(s.notifications?.length ? [`pending notifications: ${s.notifications.length}`] : []),
             ...(s.feedbackSkips?.filter((skip) => skip.task === s.task?.id)
                 .map((skip) => `skipped feedback: round ${skip.round}, ${escapeHtml(skip.agent)} (${skip.at})`) ?? []),
         ];
@@ -2086,7 +2182,7 @@ export class Telebaton {
         try {
             const reaped = await this.jobs.reapStale();
             if (reaped.length) {
-                await this.chat.send(`stopped leftover ${reaped.map((n) => `/${n}`).join(', ')} from a previous run`);
+                await this.notifications.send(`stopped leftover ${reaped.map((n) => `/${n}`).join(', ')} from a previous run`);
             }
             const s = this.state;
             if (s.taskQueue) {
@@ -2104,8 +2200,11 @@ export class Telebaton {
                 }
             }
             commands.set('help', 'commands');
-            await this.chat.takeOver(text, [...commands].map(([command, description]) => ({ command, description })));
-            if (s.taskQueue) await this.chat.send('saved task queue paused after restart; finish the current task, then /next to resume');
+            await this.notifications.takeOver(text, [...commands].map(([command, description]) => ({ command, description })));
+            if (s.taskQueue) await this.notifications.send('saved task queue paused after restart; finish the current task, then /next to resume');
+            if (s.gateContinuation) {
+                await this.notifications.send('saved successful gate has pending workflow steps; /recover to resume without rerunning the gate');
+            }
             await this.recoverPendingWork();
             await this.recoverTurns();
         } finally { this.recoveringWork = false; }

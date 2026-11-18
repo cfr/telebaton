@@ -11,8 +11,10 @@ import { FindingStore } from '../src/findings.ts';
 import type { AgentConfig, LocalConfig, ProjectCommand } from '../src/config.ts';
 import type { Adapter, AgentSession, SessionOptions, TurnResult } from '../src/agents/types.ts';
 import type { Messenger } from '../src/telegram.ts';
+import type { NotificationOutbox } from '../src/notifications.ts';
 
 interface Harness {
+    notifications: NotificationOutbox;
     adapters: Record<AgentConfig['harness'], Adapter>;
     limits: { read(agents: Iterable<AgentConfig>): Promise<string> };
     project: { gate: { name: string; cmd: string }[] };
@@ -22,6 +24,7 @@ interface Harness {
     continueTurn(args: string): Promise<void>;
     fix(notes: string): Promise<void>;
     gateCommand(): Promise<void>;
+    recoverWorkflow(): Promise<void>;
     nextTask(args: string): Promise<void>;
     backgroundCommand(command: ProjectCommand, args: string): Promise<void>;
     oneShotCommand(command: ProjectCommand, args: string): Promise<void>;
@@ -219,6 +222,46 @@ test('range validation and cancellation do not replace task state or start agent
         assert.equal(f.store.state.task?.id, '0170-task');
         assert.equal(f.store.state.taskQueue, undefined);
         assert.equal(f.prompts.length, 0);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('range aliases reach confirmation through the next command with an optional agent', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    const confirmations: string[] = [];
+    f.chat.ask = async (text) => { confirmations.push(text); return 'cancel'; };
+    try {
+        for (const args of ['171-173', '0171...0173', 'sol 171-173', '171...173 sol']) {
+            await f.commands.get('next')!(args);
+            assert.match(confirmations.at(-1)!, /Run 3 tasks/);
+            assert.match(confirmations.at(-1)!, /0173-third: third task/);
+        }
+        assert.equal(confirmations.length, 4);
+        assert.match(confirmations[2], /with sol/);
+        assert.match(confirmations[3], /with sol/);
+        assert.equal(f.store.state.taskQueue, undefined);
+        assert.equal(f.prompts.length, 0);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('queue lists remaining saved IDs in todo format and handles missing plan items', async () => {
+    const f = setup([]);
+    queuedPlan(f);
+    try {
+        await f.commands.get('queue')!('');
+        assert.equal(f.sent.at(-1), 'task queue is empty');
+        f.store.state.taskQueue = { current: '0171-first', ids: ['0173-third', '0172-second'], paused: true };
+        const before = JSON.stringify(f.store.state);
+        await f.commands.get('queue')!('');
+        assert.equal(f.sent.at(-1), '0173-third: third task\n\n0172-second: second task');
+        writeFileSync(join(f.project, 'PLAN.md'), '## Next\n- 0173-third: revised task\n  details\n');
+        await f.commands.get('queue')!('');
+        assert.equal(f.sent.at(-1), '0173-third: revised task\n\n0172-second: no longer in PLAN.md "Next"');
+        assert.equal(JSON.stringify(f.store.state), before);
+        assert.equal(f.prompts.length, 0);
+        f.store.state.taskQueue.ids = [];
+        await f.commands.get('queue')!('');
+        assert.equal(f.sent.at(-1), 'task queue is empty');
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
@@ -1282,6 +1325,124 @@ test('swap refuses unfinished tasks and ambiguous assignments without modifying 
         assert.equal(readFileSync(file, 'utf8'), original);
         assert.equal(f.h.busy, null);
         assert.equal(f.prompts.length, 0);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a blocked gate notification does not prevent feedback and task completion', { timeout: 5000 }, async () => {
+    const f = setup([], { review: '', feedback: ['ds'] });
+    f.store.state.focus = 'implement';
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const send = f.chat.send;
+    f.chat.send = async (text, route) => {
+        if (text.startsWith('gate passed')) await blocked;
+        await send(text, route);
+    };
+    try {
+        writeFileSync(join(f.project, 'code.txt'), 'implemented');
+        f.git('add', 'code.txt'); f.git('commit', '-qm', 'Implement');
+        await f.h.gateCommand();
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds']);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.gateContinuation, undefined);
+        assert.ok(new Store(f.local.stateFile).state.notifications?.some(
+            (message) => message.method === 'send' && message.args[0].startsWith('gate passed')));
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
+        release();
+        await f.h.notifications.flush();
+        assert.equal(new Store(f.local.stateFile).state.notifications, undefined);
+        await f.commands.get('recover')!('');
+        assert.equal(f.prompts.length, 1);
+    } finally { release(); await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a successful gate checkpoint survives restart and recovery advances without another gate', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    f.store.state.focus = 'implement';
+    let restarted: Harness | undefined;
+    f.h.afterImplementGate = async () => { throw new Error('simulated process failure after gate'); };
+    try {
+        writeFileSync(join(f.project, 'code.txt'), 'implemented');
+        f.git('add', 'code.txt'); f.git('commit', '-qm', 'Implement');
+        await assert.rejects(f.h.gateCommand(), /simulated process failure/);
+        await f.h.shutdown();
+        const reloaded = new Store(f.local.stateFile);
+        assert.equal(reloaded.state.gateContinuation?.gate.sha, f.git('rev-parse', 'HEAD'));
+        restarted = new Telebaton(f.local, reloaded, f.chat) as unknown as Harness;
+        restarted.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
+        restarted.live.clear();
+        await restarted.announce();
+        assert.equal(reloaded.state.taskComplete, undefined);
+        await f.commands.get('recover')!('');
+        assert.equal(reloaded.state.taskComplete, true);
+        assert.equal(reloaded.state.gateContinuation, undefined);
+        await f.commands.get('recover')!('');
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
+        assert.equal(f.prompts.length, 0);
+    } finally { await restarted?.shutdown(); await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('recovery retries a prepared checker without skipping its saved round', async () => {
+    const f = setup([], { review: '', feedback: ['ds'] });
+    f.store.state.focus = 'implement';
+    const advance = f.h.afterImplementGate.bind(f.h);
+    f.h.afterImplementGate = async () => {
+        const agent: AgentConfig = { name: 'ds', model: 'test-ds', harness: 'codex', tag: 'ds' };
+        const session = await f.adapter.create(agent, {
+            title: '0170-task feedback', cwd: f.project,
+            asker: { permission: async () => 'reject', question: async () => '' },
+        });
+        f.store.state.sessions.feedback = { id: session.id, agent: 'ds', title: '0170-task feedback', startSha: f.git('rev-parse', 'HEAD') };
+        f.store.state.feedbackRound = 1;
+        f.store.state.focus = 'feedback';
+        f.store.save();
+        throw new Error('checker preparation interrupted');
+    };
+    try {
+        writeFileSync(join(f.project, 'code.txt'), 'implemented');
+        f.git('add', 'code.txt'); f.git('commit', '-qm', 'Implement');
+        await assert.rejects(f.h.gateCommand(), /checker preparation interrupted/);
+        f.h.afterImplementGate = advance;
+        await f.commands.get('recover')!('');
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds']);
+        assert.match(f.prompts[0].text, /Custom checker prompt/);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('recovery rejects stale gates, dirty trees and different sessions', async () => {
+    for (const change of ['head', 'worktree', 'commands', 'session', 'pending work']) {
+        const f = setup([], { review: '', feedback: [] });
+        f.store.state.focus = 'implement';
+        f.h.afterImplementGate = async () => { throw new Error('interrupted transition'); };
+        try {
+            writeFileSync(join(f.project, 'code.txt'), 'implemented');
+            f.git('add', 'code.txt'); f.git('commit', '-qm', 'Implement');
+            await assert.rejects(f.h.gateCommand(), /interrupted transition/);
+            if (change === 'head' || change === 'worktree') writeFileSync(join(f.project, 'code.txt'), 'changed');
+            if (change === 'head') { f.git('add', 'code.txt'); f.git('commit', '-qm', 'Later work'); }
+            if (change === 'commands') f.store.state.gateContinuation!.gate.commands = ['another command'];
+            if (change === 'session') f.store.state.gateContinuation!.session = 'different-session';
+            if (change === 'pending work') f.h.live.get('implement')!.pendingWork = async () => [{ kind: 'subagent', description: 'still working' }];
+            await assert.rejects(f.commands.get('recover')!(''), /stale|another task or session|unfinished work/);
+            assert.notEqual(f.store.state.taskComplete, true);
+            assert.equal(f.prompts.length, 0);
+            assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
+        } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+    }
+});
+
+test('recovery recognizes legacy repair state stranded after a successful gate', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    f.store.state.focus = 'implement';
+    f.store.state.feedbackFixing = true;
+    try {
+        await f.commands.get('recover')!('');
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.feedbackFixing, undefined);
+        assert.equal(f.prompts.length, 0);
+        assert.equal(existsSync(join(f.project, 'gate-count')), false);
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 

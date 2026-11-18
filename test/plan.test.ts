@@ -33,12 +33,16 @@ test('parses Next items with continuation lines', () => {
 
 test('task ranges are inclusive, ascending and require unique planned numbers', () => {
     const items = parseNext(plan).reverse();
-    assert.deepEqual(taskRange(items, '0048..0049').map((item) => item.number), ['0048', '0049']);
+    for (const range of ['0048..0049', '48..49', '48-49', '0048-0049', '0048...0049', '48...0049']) {
+        assert.deepEqual(taskRange(items, range).map((item) => item.number), ['0048', '0049'], range);
+    }
     assert.equal(taskRange(items, '0048..0048').length, 1);
     assert.throws(() => taskRange(items, '0049..0048'), /ascending/);
     assert.throws(() => taskRange(items, '0048..0050'), /0050.*found 0/);
     assert.throws(() => taskRange([...items, items[0]], '0048..0049'), /0049.*found 2/);
-    assert.throws(() => taskRange(items, '48..49'), /inclusive task range/);
+    for (const range of ['48.49', '48....49', '0048-antlion', '48-49x', '10048-10049']) {
+        assert.throws(() => taskRange(items, range), /inclusive task range/);
+    }
 });
 
 test('queued task errors explain renumbering, removal, duplicate IDs and recovery', () => {

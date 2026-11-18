@@ -116,12 +116,14 @@ The normal loop is:
    With automatic review disabled, the task finishes after feedback and any repair gate pass;
    `/review <agent>` still starts a manual review, for example `/review sol`.
 
-`/next 0272..0280` runs an inclusive task range after one confirmation. Every number must appear
-exactly once under `PLAN.md` "Next". Tasks run in numeric order, each completing its gate and
+`/next 0272..0280` runs an inclusive task range after one confirmation. Ranges also accept
+`/next 272-280` and `/next 0272...0280`, with optional leading zeroes on either endpoint.
+Every number must appear exactly once under `PLAN.md` "Next". Tasks run in numeric order, each completing its gate and
 configured feedback/review flow before the next starts. `/next dsf 0272..0280` uses that implementer
 for the whole range; otherwise each task uses the current default. Task text is reread before
 each start. Findings requiring `/fix`, incomplete reports, failed turns and failed gates hold the
-queue until the current task is resolved. `/status` shows the remaining queue.
+queue until the current task is resolved. `/queue` lists the remaining queued tasks in the same
+format as `/todo`, in execution order. `/status` shows the remaining queue IDs.
 If PLAN.md renames or renumbers a queued task, the error shows the saved ID, the current entry
 with that number, and any matching task name at another number. Check `/todo` and confirm a new
 range to replace the queue; `/next` alone keeps the original saved IDs.
@@ -159,7 +161,9 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 | `/skip` | Skip the current feedback checker, then continue or finish if automatic review is disabled. |
 | `/continue [role] [notes]` | Resume a stopped turn or complete a pending report. |
 | `/gate` | Verify the focused implementation/review session's commits and continue the flow. |
+| `/recover` | Resume a saved successful-gate transition and retry pending notifications. |
 | `/todo [id]` | List Next items or show one in full, without an agent. |
+| `/queue` | List remaining queued tasks in execution order, using `/todo` summaries. |
 | `/plan [agent] [topic]` | Start or continue planning. |
 | `/plan done` | Write agreed items and commit `PLAN.md`. |
 | `/plan stop` | Alias for `/plan done`. |
@@ -275,6 +279,20 @@ at startup using PID records. Descendants that ignore the stop signal are killed
 period. Logs and PID records live under `commands/` beside the state file.
 
 ## Pending work and recovery
+
+Workflow notifications are saved in the state file and delivered in order by a background outbox.
+Telegram failures leave them queued for retry while task processing continues. After the API's
+request retries finish, the outbox waits 30 seconds before trying again. `/status` includes the
+pending notification count. Pending deliveries survive a restart. A timeout or process exit after
+Telegram accepted a message can cause that message to be delivered again.
+
+A successful gate saves its pending workflow transition before advancing to feedback, review, or
+completion. If that transition is interrupted, `/recover` resumes it without rerunning the gate or
+prompting the implementer again. Recovery requires the same task, session, commit, gate commands,
+and a clean worktree, with no unfinished implementation, feedback, or review work. A stale gate
+requires `/gate` to verify the current work. `/recover` also retries queued notifications and
+recognizes older repair state left behind when a successful gate's notification failed. Saved
+transitions are announced at startup and remain available for explicit recovery.
 
 `/roles` prints defaults with space-separated feedback agents, such as `feedback: glmf dsf`.
 Current-task swaps appear as `implement: k3 -> sol` or `feedback: 1/2 — glmf -> sol`.
