@@ -31,7 +31,8 @@ Telebaton assigns stable IDs. Link related coverage gaps with "relatedTo":"new1"
 or an existing finding ID; report repeated findings with "duplicateOf":"existing-ID". Do not silently
 merge similar findings. For previous fixes use verifications [{"id":"existing-ID","status":"verified",
 "reason":"Independent evidence at this SHA"}]. Other statuses: "open" for a still-broken/rejected fix,
-"accepted_rejection" when the rejection or deferral is justified. Verify every pending claimed fix.
+"accepted_rejection" when the rejection or deferral is justified. Assess every pending fix,
+rejection and deferral explicitly. Accepted deferrals remain resolved while their platform is unavailable.
 Do not put duplicate IDs in verifications: assess the original finding ID listed in the verification
 checklist instead. Follow duplicateOf chains to the original; relatedTo findings remain separate
 and each pending related fix requires its own verification entry. A duplicate needs no separate
@@ -145,6 +146,8 @@ export class FeedbackTracker {
     }
     async begin(ids: string[]): Promise<void> {
         const state = this.store.state;
+        state.sessions.feedback!.findingIds = ids;
+        state.sessions.feedback!.verificationPending = true;
         state.feedbackFindingIds = ids;
         state.feedbackFixBase = await repo.head(this.project.root);
         state.feedbackDispositionRetried = undefined;

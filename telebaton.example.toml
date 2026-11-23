@@ -20,9 +20,9 @@ plan = "opus"
 
 [agents.glm]
 harness = "opencode"
-model = "zai-coding-plan/glm-5.3"
+model = "zai-coding-plan/glm-5.4"
 variant = "default"
-tag = "glm53"
+tag = "glm54"
 
 [agents.ds]
 harness = "opencode"
@@ -47,12 +47,12 @@ tag = "opus55"
 harness = "codex"
 model = "gpt-6.2-sol"
 effort = "high"
-tag = "codex"
+tag = "sol62"
 
 [flow]
-# feedback checks (roles.feedback reports, the implementer fixes) before the review; defaults to
-# the length of roles.feedback, 0 skips them
-feedback_rounds = 3
+# Feedback steps before review; each checker verifies its repairs within its own step.
+# Defaults to the length of roles.feedback; 0 skips feedback.
+feedback_rounds = 2
 
 [logs]
 dir = "wlog"

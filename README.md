@@ -109,11 +109,12 @@ The normal loop is:
 2. Telebaton runs the gate after a committing turn. A failure goes back to the agent once;
    a second failure waits for you. A turn without a commit normally waits for your response.
 3. Feedback agents check in the configured order. Actionable findings go to the implementer,
-   which records dispositions and commits repairs. Telebaton gates those commits before the next
-   check. Later checkers receive earlier findings, rejection reasons, repairs, and gate evidence.
+   which records dispositions and commits repairs. Telebaton gates those commits, then returns to
+   the same checker session to verify the repairs before advancing. Rejections and deferrals are
+   also assessed by that checker. Later checkers receive the findings, dispositions and gate evidence.
 4. The review agent checks the combined result. `/fix [notes]` asks that reviewer to apply fixes
    and commit; Telebaton runs the gate again. Review fixes require your instruction, normally `/fix`.
-   With automatic review disabled, the task finishes after feedback and any repair gate pass;
+   With automatic review disabled, the task finishes after feedback repairs have passed verification;
    `/review <agent>` still starts a manual review, for example `/review sol`.
 
 `/next 0272..0280` runs an inclusive task range after one confirmation. Ranges also accept
@@ -133,12 +134,16 @@ range to replace the queue; `/next` alone keeps the original saved IDs.
 in a paused state. `/next cancel` clears future tasks without stopping the current one. Starting
 an explicitly selected single task replaces the queue only after confirmation.
 
-`[flow] feedback_rounds` defaults to the number of feedback agents; `0` skips feedback. Repeated
-names allow rechecks in the same session. A clean verdict or an answer without commits skips
-remaining consecutive rounds for that agent and moves to the next listed agent. If more rounds
-are configured than names, the last agent repeats. `/feedback [agent]` adds a check manually.
-For example, `feedback = ["glm", "k3", "sol", "sol"]` with `review = ""` lets Sol check the
-implementer's repairs on its second pass; a clean first Sol pass skips the redundant second pass.
+`[flow] feedback_rounds` defaults to the number of feedback agents; `0` skips feedback. Each step
+includes the initial check and any repair verification turns in the same checker session. Those
+verification turns keep the same round number. Open findings go back to the implementer and are
+verified again after the applicable gate passes. Answers without commits also return to the checker
+to assess rejections or deferrals. Accepted deferrals remain resolved while their platform is unavailable.
+A clean result advances to the next listed agent, skipping consecutive duplicate entries. If more
+rounds are configured than names, the last agent repeats. `/feedback [agent]` adds a check manually.
+For example, `feedback = ["glm", "k3", "sol"]` with `review = ""` gives each model its own
+check, repair and verification step. Malformed verification reports get one correction turn before
+pausing, and `/continue feedback` resumes a failed or interrupted verification.
 
 Agents follow the project's instructions for commits and for moving completed tasks from
 `PLAN.md` to `CHANGELOG.md`. Telebaton does not edit those files. Gate output, commit summaries,

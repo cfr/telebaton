@@ -18,6 +18,7 @@ export interface SessionRef {
     reportRetried?: boolean;
     expectReport?: boolean;
     findingIds?: string[];
+    verificationPending?: boolean;
     fixBase?: string;
     fixingFindings?: boolean;
     dispositionRetried?: boolean;

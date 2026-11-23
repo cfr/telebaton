@@ -70,7 +70,10 @@ test('duplicate links preserve provenance; unresolved bugs stay actionable; cycl
     applyFeedback(l, report([finding()]), checker);
     assert.throws(() => applyFeedback(l, report([]), checker), /verdict disagrees/);
     applyDispositions(l, answers([{ id: '0169-F01', status: 'rejected', reason: 'Requires prohibited history rewrite' }]), implementer, ['0169-F01'], []);
-    assert.deepEqual(applyFeedback(l, report([{ ...finding('repeat'), duplicateOf: '0169-F01' }], [], 'clean'), checker), []);
+    assert.throws(() => applyFeedback(l, report([], [], 'clean'), checker), /assess pending rejection or deferral/);
+    assert.deepEqual(applyFeedback(l, report([{ ...finding('repeat'), duplicateOf: '0169-F01' }], [
+        { id: '0169-F01', status: 'accepted_rejection', reason: 'History rewrite is prohibited' },
+    ], 'clean'), checker), []);
     assert.equal(l.findings[1].disposition, 'duplicate');
     assert.equal(l.findings[1].duplicateOf, '0169-F01');
     assert.throws(() => applyFeedback(l, report([

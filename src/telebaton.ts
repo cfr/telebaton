@@ -638,6 +638,11 @@ export class Telebaton {
     }
 
     private async afterImplementGate(freshPrompt = false) {
+        const checker = this.state.sessions.feedback;
+        if (checker?.verificationPending) {
+            await this.runFeedback(checker.agent);
+            return;
+        }
         const next = this.nextFeedbackAgent();
         if (next) {
             await this.runFeedback(next, freshPrompt);
@@ -663,6 +668,11 @@ export class Telebaton {
     // Nothing to recheck: the current agent's remaining rounds are skipped and the next listed agent checks afresh.
     private async afterSettledCheck(why: string) {
         const ref = this.state.sessions.feedback;
+        if (ref) {
+            ref.verificationPending = undefined;
+            ref.findingIds = undefined;
+            this.store.save();
+        }
         const current = ref?.agent;
         const overridden = ref?.overrideRound !== undefined && ref.overrideRound === this.state.feedbackRound;
         let done = this.state.feedbackRound ?? 0;
@@ -684,7 +694,8 @@ export class Telebaton {
         this.requireIdleFlow();
         this.reload();
         const { agent } = this.parseArgs(args);
-        const name = agent ?? this.nextFeedbackAgent() ?? this.project.roles.feedback.at(-1);
+        const pending = this.state.sessions.feedback;
+        const name = agent ?? (pending?.verificationPending ? pending.agent : this.nextFeedbackAgent()) ?? this.project.roles.feedback.at(-1);
         if (!name) {
             await this.notifications.send('no feedback agent: set roles.feedback in the project configuration, or /feedback <agent>');
             return;
@@ -736,6 +747,8 @@ export class Telebaton {
         this.state.feedbackSkips.push({ task: this.state.task!.id, agent: ref.agent, round,
             at: new Date().toISOString(), logFile: ref.logFile });
         ref.skipRequested = undefined;
+        ref.verificationPending = undefined;
+        ref.findingIds = undefined;
         this.state.feedbackReportRetried = undefined;
         this.store.save();
         const next = this.nextFeedbackAgent();
@@ -749,7 +762,9 @@ export class Telebaton {
     private async runFeedback(agentName: string, freshPrompt = false) {
         this.requireSettledWork();
         const task = this.state.task!;
-        const round = (this.state.feedbackRound ?? 0) + 1;
+        const verifying = !freshPrompt && this.state.sessions.feedback?.agent === agentName &&
+            this.state.sessions.feedback.verificationPending;
+        const round = verifying ? (this.state.feedbackRound ?? 1) : (this.state.feedbackRound ?? 0) + 1;
         const first = !this.state.sessions.feedback || this.state.sessions.feedback.agent !== agentName;
         this.claim('feedback');
         let text: string;
@@ -765,8 +780,17 @@ export class Telebaton {
                 text = fill(this.project.prompts.feedbackAgain, this.vars({ reply }));
             }
             this.state.sessions.feedback!.checkedSha = await repo.head(this.project.root);
-            this.state.sessions.feedback!.originalAgent = undefined;
-            this.state.sessions.feedback!.overrideRound = undefined;
+            if (verifying) {
+                const ids = this.state.sessions.feedback!.findingIds;
+                if (ids?.length) text += `\n\nRequested verification IDs: ${ids.join(', ')}`;
+                text += '\n\nVerify your requested repairs and their relevant regressions in this same feedback step. ' +
+                    'Assess every pending finding ID, including rejected or deferred findings. ' +
+                    'Accept a justified platform deferral explicitly; previously accepted deferrals remain resolved. ' +
+                    'Use focused inspection or checks and the recorded gate evidence.';
+            } else {
+                this.state.sessions.feedback!.originalAgent = undefined;
+                this.state.sessions.feedback!.overrideRound = undefined;
+            }
             this.state.feedbackRound = round;
             this.state.feedbackReportRetried = undefined;
             this.state.sessions.feedback!.trackedFindings = true;
@@ -776,7 +800,7 @@ export class Telebaton {
             this.busy = null;
         }
         const of = Math.max(this.project.feedbackRounds, round);
-        await this.turn('feedback', text, `checking ${task.id} (feedback ${round}/${of})`);
+        await this.turn('feedback', text, `${verifying ? 'verifying repairs for' : 'checking'} ${task.id} (feedback ${round}/${of})`);
     }
 
     private async afterFeedback(report: string) {
@@ -822,6 +846,7 @@ export class Telebaton {
         if (findingIds) await this.feedbackTracker.begin(findingIds);
         else {
             this.state.feedbackFixing = true;
+            if (this.state.sessions.feedback) this.state.sessions.feedback.verificationPending = true;
             this.state.focus = 'implement';
             this.store.save();
         }
@@ -1383,8 +1408,9 @@ export class Telebaton {
         }
         if (role === 'implement' && this.state.feedbackFixing && r.outcome === 'succeeded') {
             this.state.feedbackFixing = undefined;
+            if (this.state.sessions.feedback) this.state.sessions.feedback.verificationPending = true;
             this.store.save();
-            await this.afterSettledCheck('the implementer changed nothing for the feedback');
+            await this.afterImplementGate();
         }
     }
 
@@ -1789,6 +1815,9 @@ export class Telebaton {
 
     private async advanceAfterGate(role: Role, freshPrompt = false) {
         if (role === 'implement') {
+            if (this.state.feedbackFixing && this.state.sessions.feedback) {
+                this.state.sessions.feedback.verificationPending = true;
+            }
             this.state.feedbackFindingIds = undefined;
             this.state.feedbackFixBase = undefined;
             this.state.feedbackDispositionRetried = undefined;

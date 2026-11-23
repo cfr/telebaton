@@ -403,10 +403,10 @@ test('stop during a range prevents automatic advancement after the current gate 
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test('a repeated final feedback agent verifies repairs before completing without automatic review', async () => {
+test('a single final feedback entry verifies repairs before completing without automatic review', async () => {
     const f = setup([feedback([]), feedback([]), feedback([finding]), feedback([], [
         { id: '0170-F01', status: 'verified', reason: 'Independent regression check at repaired SHA' },
-    ])], { review: '', feedback: ['ds', 'glm', 'sol', 'sol'] });
+    ])], { review: '', feedback: ['ds', 'glm', 'sol'] });
     try {
         await f.h.afterImplementGate();
         assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'glm', 'sol', 'kimi', 'sol']);
@@ -428,6 +428,128 @@ test('a clean final feedback skips redundant rounds with automatic review disabl
         assert.equal(f.prompts.length, 1);
         assert.equal(f.store.state.taskComplete, true);
         assert.equal(f.store.state.sessions.review, undefined);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('each original checker verifies repairs in its own session and feedback round', async () => {
+    const checks = ['ds', 'glm', 'sol'];
+    const replies = checks.flatMap((agent, i) => [
+        feedback([{ ...finding, key: agent, summary: `${agent} finding` }]),
+        feedback([], [{ id: `0170-F0${i + 1}`, status: 'verified', reason: `${agent} reproduced the repair` }]),
+    ]);
+    const f = setup(replies, { review: '', feedback: checks });
+    f.setImplementationReplies(checks.map((agent, i) => '```telebaton-dispositions\n' + JSON.stringify({
+        dispositions: [{ id: `0170-F0${i + 1}`, status: 'fixed', reason: `Repaired ${agent} finding` }],
+    }) + '\n```'));
+    try {
+        await f.h.afterImplementGate();
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'ds', 'glm', 'kimi', 'glm', 'sol', 'kimi', 'sol']);
+        assert.equal(f.store.state.feedbackRound, 3);
+        assert.equal(f.store.state.taskComplete, true);
+        for (const finding of f.records.read('0170-task').findings) {
+            assert.equal(finding.verification, 'verified');
+            assert.equal(finding.history.at(-1)?.source.session, finding.source.session);
+            assert.equal(finding.history.at(-1)?.source.model, finding.source.model);
+        }
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\npassed\npassed\n');
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('an open repair returns to the implementer and original checker without advancing the round', async () => {
+    const f = setup([
+        feedback([finding]),
+        feedback([], [{ id: '0170-F01', status: 'open', reason: 'Regression still fails' }], 'findings'),
+        feedback([], [{ id: '0170-F01', status: 'verified', reason: 'Second repair fixes the regression' }]),
+    ], { review: '', feedback: ['ds'] });
+    try {
+        await f.h.afterImplementGate();
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'ds', 'kimi', 'ds']);
+        assert.equal(f.store.state.feedbackRound, 1);
+        assert.equal(f.store.state.taskComplete, true);
+        const finding = f.records.read('0170-task').findings[0];
+        assert.deepEqual(finding.history.map((h) => h.action), ['fixed', 'open', 'fixed', 'verified']);
+        assert.equal(finding.history.at(-1)?.source.session, finding.source.session);
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\npassed\n');
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('the original checker accepts a platform deferral without a gate or repeated validation requests', async () => {
+    const f = setup([
+        feedback([{ ...finding, category: 'test_gap', summary: 'macOS check unavailable' }]),
+        feedback([], [{ id: '0170-F01', status: 'accepted_rejection', reason: 'No macOS host is available' }]),
+        feedback([]),
+    ], { review: '', feedback: ['ds', 'glm'] });
+    f.setImplementationCommits(false);
+    f.setImplementationReplies(['```telebaton-dispositions\n' + JSON.stringify({ dispositions: [
+        { id: '0170-F01', status: 'deferred', reason: 'No macOS host; Linux checks are recorded' },
+    ] }) + '\n```']);
+    try {
+        await f.h.afterImplementGate();
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'ds', 'glm']);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.feedbackRound, 2);
+        assert.equal(existsSync(join(f.project, 'gate-count')), false);
+        const finding = f.records.read('0170-task').findings[0];
+        assert.equal(finding.disposition, 'deferred');
+        assert.equal(finding.verification, 'accepted_rejection');
+        assert.equal(finding.history.at(-1)?.source.session, finding.source.session);
+        assert.match(f.prompts[2].text, /pending fixes, rejections and deferrals/);
+        assert.match(f.prompts[3].text, /No pending claimed fixes/);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a failed repair verification survives restart and resumes in the same checker session', async () => {
+    const f = setup([
+        feedback([finding]),
+        feedback([], [{ id: '0170-F01', status: 'verified', reason: 'Repaired SHA independently checked' }]),
+    ], { review: '', feedback: ['ds'] });
+    const create = f.adapter.create.bind(f.adapter);
+    f.adapter.create = async (agent, opts) => {
+        const session = await create(agent, opts);
+        const send = session.send.bind(session);
+        let calls = 0;
+        session.send = async (text) => {
+            if (agent.name === 'ds' && ++calls === 2) return { outcome: 'failed', text: '', error: 'Temporary provider failure' };
+            return send(text);
+        };
+        return session;
+    };
+    let restarted: Harness | undefined;
+    try {
+        await f.h.afterImplementGate();
+        assert.notEqual(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.feedbackRound, 1);
+        assert.equal(f.store.state.sessions.feedback?.verificationPending, true);
+        const checkerId = f.store.state.sessions.feedback!.id;
+        await f.h.shutdown();
+        const store = new Store(f.local.stateFile);
+        restarted = new Telebaton(f.local, store, f.chat) as unknown as Harness;
+        restarted.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
+        restarted.live.clear();
+        await restarted.announce();
+        await restarted.continueTurn('feedback');
+        assert.equal(store.state.taskComplete, true);
+        assert.equal(store.state.feedbackRound, 1);
+        assert.equal(store.state.sessions.feedback!.id, checkerId);
+        assert.equal(store.state.sessions.feedback!.verificationPending, undefined);
+        assert.equal(f.records.read('0170-task').findings[0].verification, 'verified');
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
+    } finally { await restarted?.shutdown(); await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a clean verification without finding receipts pauses in the same feedback step', async () => {
+    const f = setup([feedback([finding]), feedback([]), feedback([])], { review: '', feedback: ['ds', 'glm'] });
+    try {
+        await f.h.afterImplementGate();
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'ds', 'ds']);
+        assert.equal(f.store.state.feedbackRound, 1);
+        assert.notEqual(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.sessions.feedback?.verificationPending, true);
+        assert.equal(f.store.state.feedbackReportRetried, true);
+        assert.equal(f.records.read('0170-task').findings[0].verification, 'pending');
+        assert.match(f.prompts[2].text, /Requested verification IDs: 0170-F01/);
+        assert.match(f.prompts[3].text, /verify pending fix 0170-F01/);
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
@@ -464,7 +586,7 @@ test('normal task flow never sends attachments; /diff delivers task changes or o
     const initial = f.git('rev-parse', 'HEAD');
     try {
         await f.h.afterImplementGate();
-        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'glm', 'mm', 'sol']);
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'ds', 'glm', 'mm', 'sol']);
         assert.equal(f.store.state.feedbackFixing, undefined);
         assert.equal(f.store.state.taskComplete, true);
         assert.equal(f.records.read('0170-task').findings[0].verification, 'verified');
@@ -499,19 +621,19 @@ test('full feedback flow records actual repair commits, passes ledger/gate conte
     ]);
     try {
         await f.h.afterImplementGate();
-        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'glm', 'mm', 'sol']);
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'ds', 'glm', 'mm', 'sol']);
         const l = f.records.read('0170-task');
         assert.equal(l.findings[0].disposition, 'fixed');
         assert.equal(l.findings[0].verification, 'verified');
         assert.deepEqual(l.findings[0].fixCommits, [f.git('rev-parse', 'HEAD')]);
         assert.equal(l.findings[0].source.agent, 'ds');
-        const glm = f.prompts.find((p) => p.agent === 'glm')!.text;
-        assert.match(glm, /Custom checker prompt/);
-        assert.match(glm, /0170-F01 \[bug; fixed; verification pending\]/);
-        assert.match(glm, /Telebaton gate: PASSED at/);
-        assert.match(glm, /Telebaton owns the full verification gate/);
-        assert.match(glm, /regression test failing without the fix/);
-        assert.match(glm, /real caller\/entry path/);
+        const verifier = f.prompts.filter((p) => p.agent === 'ds')[1].text;
+        assert.match(verifier, /Verify your requested repairs/);
+        assert.match(verifier, /0170-F01 \[bug; fixed; verification pending\]/);
+        assert.match(verifier, /Telebaton gate: PASSED at/);
+        assert.match(verifier, /Telebaton owns the full verification gate/);
+        assert.match(verifier, /regression test failing without the fix/);
+        assert.match(verifier, /real caller\/entry path/);
         assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\n');
         assert.match(readFileSync(join(f.project, 'wlog', '0170-task-findings.md'), 'utf8'), /verification verified/);
         assert.ok(existsSync(join(f.project, 'wlog', '0170-task-gate.log')));
@@ -563,7 +685,7 @@ test('malformed dispositions are corrected without losing the original repair co
     f.setImplementationReplies(['Fixed the code.', answer]);
     try {
         await f.h.afterImplementGate();
-        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'kimi', 'glm', 'mm', 'sol']);
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'kimi', 'ds', 'glm', 'mm', 'sol']);
         for (const prompt of f.prompts.filter((p) => p.agent === 'kimi')) {
             const blocks = [...prompt.text.matchAll(/```telebaton-dispositions\n([\s\S]*?)\n```/g)];
             assert.equal(blocks.length, 1);
@@ -596,16 +718,18 @@ test('repair and correction examples include every actual requested finding ID',
 });
 
 
-test('final review independently verifies fixes from the last feedback checker', async () => {
-    const f = setup([feedback([]), feedback([]), feedback([finding])]);
-    f.setReviewReplies([feedback([], [{ id: '0170-F01', status: 'verified', reason: 'Final review reproduced the regression test' }])]);
+test('the last feedback checker verifies its fixes before the final review', async () => {
+    const f = setup([feedback([]), feedback([]), feedback([finding]), feedback([], [
+        { id: '0170-F01', status: 'verified', reason: 'Original checker reproduced the regression test' },
+    ])]);
     try {
         await f.h.afterImplementGate();
         const l = f.records.read('0170-task');
         assert.equal(l.findings[0].verification, 'verified');
-        assert.equal(l.findings[0].history.at(-1)?.source.role, 'review');
+        assert.equal(l.findings[0].history.at(-1)?.source.role, 'feedback');
+        assert.equal(l.findings[0].history.at(-1)?.source.agent, 'mm');
         assert.equal(l.reports.at(-1)?.kind, 'review');
-        assert.match(f.prompts.at(-1)!.text, /0170-F01 \[bug; fixed; verification pending\]/);
+        assert.match(f.prompts.at(-1)!.text, /0170-F01 \[bug; fixed; verification verified\]/);
     } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
@@ -619,13 +743,13 @@ test('checkers receive duplicate mappings and correction prompts name the origin
     ]);
     try {
         await f.h.afterImplementGate();
-        const mm = f.prompts.filter((p) => p.agent === 'mm');
-        assert.equal(mm.length, 2);
-        assert.match(mm[0].text, /Verification checklist:/);
-        assert.match(mm[0].text, /No pending claimed fixes/);
-        assert.match(mm[0].text, /0170-F02 duplicates 0170-F01/);
-        assert.match(mm[0].text, /0170-F02 \[bug; duplicate; verification follows 0170-F01\]/);
-        assert.match(mm[1].text, /0170-F02 is a duplicate of 0170-F01.*omit 0170-F02 from verifications/);
+        const verifier = f.prompts.filter((p) => p.agent === 'glm');
+        assert.equal(verifier.length, 2);
+        assert.match(verifier[0].text, /Verification checklist:/);
+        assert.match(verifier[0].text, /No pending claimed fixes/);
+        assert.match(verifier[0].text, /0170-F02 duplicates 0170-F01/);
+        assert.match(verifier[0].text, /0170-F02 \[bug; duplicate; verification follows 0170-F01\]/);
+        assert.match(verifier[1].text, /0170-F02 is a duplicate of 0170-F01.*omit 0170-F02 from verifications/);
         assert.match(f.prompts.find((p) => p.agent === 'sol')!.text, /0170-F02 duplicates 0170-F01/);
         const l = f.records.read('0170-task');
         assert.equal(l.reports.filter((r) => r.error).length, 1);
@@ -707,7 +831,7 @@ test('gate-failure repair commits stay linked and require dispositions before su
     f.h.project.gate[0].cmd = 'echo passed >> gate-count; test "$(wc -l < gate-count)" -ge 2';
     try {
         await f.h.afterImplementGate();
-        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'kimi', 'glm', 'mm', 'sol']);
+        assert.deepEqual(f.prompts.map((p) => p.agent), ['ds', 'kimi', 'kimi', 'ds', 'glm', 'mm', 'sol']);
         const bug = f.records.read('0170-task').findings[0];
         assert.equal(bug.fixCommits.length, 2);
         assert.equal(bug.fixCommits[0], f.git('rev-parse', 'HEAD'));

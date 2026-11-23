@@ -173,8 +173,10 @@ export function applyFeedback(ledger: Ledger, text: string, source: Source): str
             throw new Error(`${v.id} has no rejection/deferral to accept`);
         }
     }
-    for (const f of ledger.findings.filter((f) => f.disposition === 'fixed' && f.verification === 'pending')) {
-        if (!report.verifications.some((v) => v.id === f.id)) throw new Error(`verify pending fix ${f.id}`);
+    for (const f of pendingVerifications(ledger)) {
+        if (!report.verifications.some((v) => v.id === f.id)) {
+            throw new Error(f.disposition === 'fixed' ? `verify pending fix ${f.id}` : `assess pending rejection or deferral ${f.id}`);
+        }
     }
     const actionable = [...new Set([...additions.filter((f) => !f.duplicateOf).map((f) => f.id),
         ...ledger.findings.filter((f) => f.disposition === 'open').map((f) => f.id),
@@ -230,14 +232,18 @@ function originalFinding(finding: Finding, byId: Map<string, Finding>): Finding 
     return current;
 }
 
+function pendingVerifications(ledger: Ledger): Finding[] {
+    return ledger.findings.filter((f) => ['fixed', 'rejected', 'deferred'].includes(f.disposition) && f.verification === 'pending');
+}
+
 export function verificationChecklist(ledger: Ledger): string {
-    const pending = ledger.findings.filter((f) => f.disposition === 'fixed' && f.verification === 'pending');
+    const pending = pendingVerifications(ledger);
     const byId = new Map(ledger.findings.map((f) => [f.id, f]));
     const duplicates = ledger.findings.filter((f) => f.disposition === 'duplicate');
     return [
         'Verification checklist:',
-        ...(pending.length ? ['Required pending fixes (assess each ID independently):',
-            ...pending.map((f) => `- ${f.id}: ${f.summary}`)] : ['No pending claimed fixes require verification.']),
+        ...(pending.length ? ['Required pending fixes, rejections and deferrals (assess each ID independently):',
+            ...pending.map((f) => `- ${f.id} (${f.disposition}): ${f.summary}`)] : ['No pending claimed fixes require verification.']),
         ...(duplicates.length ? ['Duplicates (omit these IDs from verifications; only originals listed above require verification):',
             ...duplicates.map((f) => {
                 const original = originalFinding(f, byId);
