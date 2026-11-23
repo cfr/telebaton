@@ -321,6 +321,62 @@ test('unfinished tasks and changed queued PLAN items block queue progress withou
     } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('a failed queued session creation preserves the previous task and /next retries without confirmation', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.store.state.lastGate!.sha = f.git('rev-parse', 'HEAD');
+    const before = structuredClone(f.store.state);
+    const previousSession = f.h.live.get('implement');
+    const create = f.adapter.create.bind(f.adapter);
+    let attempts = 0;
+    f.adapter.create = async (agent, opts) => {
+        if (attempts++ === 0) throw new Error('model catalog unavailable');
+        return create(agent, opts);
+    };
+    f.store.state.taskQueue = { ids: ['0171-first', '0172-second'], current: '0170-task', paused: true };
+    f.chat.ask = async () => { throw new Error('the saved queue must not ask again'); };
+    try {
+        await assert.rejects(f.commands.get('next')!(''), /model catalog unavailable/);
+        assert.deepEqual(f.store.state.task, before.task);
+        assert.deepEqual(f.store.state.sessions, before.sessions);
+        assert.deepEqual(f.store.state.lastGate, before.lastGate);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.h.live.get('implement'), previousSession);
+        const saved = new Store(f.local.stateFile).state;
+        assert.deepEqual(saved.task, before.task);
+        assert.equal(saved.taskQueue?.paused, true);
+        assert.deepEqual(saved.taskQueue?.ids, ['0171-first', '0172-second']);
+        await f.commands.get('next')!('');
+        assert.deepEqual(f.prompts.map((p) => /^please do (\S+)/.exec(p.text)?.[1]), ['0171-first', '0172-second']);
+        assert.equal(f.store.state.taskComplete, true);
+        assert.equal(f.store.state.taskQueue, undefined);
+    } finally { await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('/next recovers older queued startup state with no implementation session after restart', async () => {
+    const f = setup([], { review: '', feedback: [] });
+    queuedPlan(f);
+    f.store.state.task = { id: '0171-first', number: '0171', text: 'first task' };
+    f.store.state.taskComplete = false;
+    f.store.state.sessions = {};
+    f.store.state.lastGate = undefined;
+    f.store.state.taskQueue = { ids: ['0171-first', '0172-second'], current: '0170-task', paused: true };
+    f.store.save();
+    const store = new Store(f.local.stateFile);
+    const restarted = new Telebaton(f.local, store, f.chat) as unknown as Harness;
+    restarted.adapters = { codex: f.adapter, opencode: f.adapter, claude: f.adapter };
+    f.store.state = store.state;
+    f.chat.ask = async () => { throw new Error('the saved queue must not ask again'); };
+    try {
+        await restarted.announce();
+        await f.commands.get('next')!('');
+        assert.deepEqual(f.prompts.map((p) => /^please do (\S+)/.exec(p.text)?.[1]), ['0171-first', '0172-second']);
+        assert.equal(store.state.taskComplete, true);
+        assert.equal(store.state.taskQueue, undefined);
+        assert.equal(readFileSync(join(f.project, 'gate-count'), 'utf8'), 'passed\npassed\n');
+    } finally { await restarted.shutdown(); await f.h.shutdown(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('renumbered queued tasks pause with actionable diagnostics and retain the saved queue', async () => {
     const f = setup([], { review: '', feedback: [] });
     queuedPlan(f);

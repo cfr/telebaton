@@ -182,18 +182,24 @@ export class OpencodeAdapter implements Adapter {
     }
 
     private async checkVariant(providerID: string, id: string, variant: string) {
-        const res = await this.api<{ data: { providerID: string; id: string; variants?: { id: string }[] }[] }>(
-            'GET',
-            '/api/model',
-        );
-        const model = res.data.find((m) => m.providerID === providerID && m.id === id);
-        if (!model) {
-            throw new Error(`opencode has no model ${providerID}/${id}`);
+        // OpenCode 2.4 loads plugins asynchronously and can initially return a partial catalog.
+        const attempts = 10;
+        for (let attempt = 0; attempt < attempts; attempt++) {
+            const res = await this.api<{ data: { providerID: string; id: string; variants?: { id: string }[] }[] }>(
+                'GET',
+                '/api/model',
+            );
+            const model = res.data.find((m) => m.providerID === providerID && m.id === id);
+            if (model) {
+                const allowed = ['default', ...(model.variants ?? []).map((v) => v.id)];
+                if (!allowed.includes(variant)) {
+                    throw new Error(`${providerID}/${id} has no variant "${variant}"; one of ${allowed.join(', ')}`);
+                }
+                return;
+            }
+            if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 1000));
         }
-        const allowed = ['default', ...(model.variants ?? []).map((v) => v.id)];
-        if (!allowed.includes(variant)) {
-            throw new Error(`${providerID}/${id} has no variant "${variant}"; one of ${allowed.join(', ')}`);
-        }
+        throw new Error(`opencode has no model ${providerID}/${id} after waiting for the model catalog to load`);
     }
 
     async create(agent: AgentConfig, opts: SessionOptions): Promise<AgentSession> {

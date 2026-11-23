@@ -352,7 +352,7 @@ export class Telebaton {
         return s;
     }
 
-    private async createSession(role: SessionRole, agentName: string, title: string) {
+    private async createSession(role: SessionRole, agentName: string, title: string, prepare?: () => void) {
         const agent = this.agent(agentName);
         const s = await this.adapters[agent.harness].create(agent, {
             title,
@@ -366,12 +366,14 @@ export class Telebaton {
                 this.store.save();
             },
         });
+        const startSha = await repo.head(this.project.root);
+        prepare?.();
         this.live.set(role, s);
         this.state.sessions[role] = {
             agent: agentName,
             id: s.id,
             title,
-            startSha: await repo.head(this.project.root),
+            startSha,
         };
         this.store.save();
     }
@@ -490,19 +492,20 @@ export class Telebaton {
     }
 
     private async prepareTask(item: PlanItem, agentName: string) {
-        this.dropTaskSessions();
-        this.state.task = item;
-        this.state.taskComplete = false;
-        this.state.sessions = this.keepSideSessions();
-        this.state.focus = 'implement';
-        this.state.lastGate = undefined;
-        this.state.feedbackRound = undefined;
-        this.state.feedbackFixing = undefined;
-        this.state.feedbackFindingIds = undefined;
-        this.state.feedbackFixBase = undefined;
-        this.state.feedbackDispositionPending = undefined;
-        this.state.workConflict = undefined;
-        await this.createSession('implement', agentName, item.id);
+        await this.createSession('implement', agentName, item.id, () => {
+            this.dropTaskSessions();
+            this.state.task = item;
+            this.state.taskComplete = false;
+            this.state.sessions = this.keepSideSessions();
+            this.state.focus = 'implement';
+            this.state.lastGate = undefined;
+            this.state.feedbackRound = undefined;
+            this.state.feedbackFixing = undefined;
+            this.state.feedbackFindingIds = undefined;
+            this.state.feedbackFixBase = undefined;
+            this.state.feedbackDispositionPending = undefined;
+            this.state.workConflict = undefined;
+        });
     }
 
     private async advanceQueue() {
@@ -513,7 +516,8 @@ export class Telebaton {
                 const queue = this.state.taskQueue;
                 this.requireSettledWork();
                 this.reload();
-                if (queue.current && (!this.state.lastGate?.ok || this.state.lastGate.sha !== await repo.head(this.project.root) ||
+                // The queue head is prepared only after the previous task's gate has authorized advancement.
+                if (queue.current && !this.queuedTaskAwaitingSession() && (!this.state.lastGate?.ok || this.state.lastGate.sha !== await repo.head(this.project.root) ||
                     JSON.stringify(this.state.lastGate.commands) !== JSON.stringify(this.project.gate.map((step) => step.cmd)))) {
                     throw new Error(`task queue paused: ${queue.current} needs a successful gate at the current commit and configuration`);
                 }
@@ -1980,8 +1984,15 @@ export class Telebaton {
         }
     }
 
+    private queuedTaskAwaitingSession(): boolean {
+        const s = this.state;
+        return !!s.task && s.taskQueue?.ids[0] === s.task.id &&
+            !s.sessions.implement && !s.sessions.feedback && !s.sessions.review;
+    }
+
     private taskInProgress(): boolean {
         if (!this.state.task || this.state.taskComplete) return false;
+        if (this.queuedTaskAwaitingSession()) return false;
         const review = this.state.sessions.review;
         // Older state files predate the explicit completion flag.
         if (this.state.taskComplete === undefined && review?.trackedFindings && !review.expectReport &&

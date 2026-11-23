@@ -30,6 +30,9 @@ Install and authenticate the harnesses you intend to use:
 | `codex` | Uses `codex exec --json` and `exec resume`. Sign in with `codex login`. |
 | `claude` | Runs Claude Code through the Anthropic Agent SDK. |
 
+OpenCode loads provider plugins asynchronously. When validating a configured model variant,
+Telebaton polls a missing model for up to nine seconds while the catalog loads.
+
 Telebaton can start without a separate Claude Code installation and does not launch a Claude
 process merely because the adapter exists. A Claude process starts only when a Claude session
 gets a turn. The Anthropic SDK npm dependency is still required because it is imported at startup.
@@ -133,6 +136,8 @@ range to replace the queue; `/next` alone keeps the original saved IDs.
 `/next` to resume the remaining tasks without another confirmation. The queue survives restarts
 in a paused state. `/next cancel` clears future tasks without stopping the current one. Starting
 an explicitly selected single task replaces the queue only after confirmation.
+If a queued task's implementation session could not be created, `/next` retries that task and
+preserves the remaining queue. It also recovers older saved startup failures with no task session.
 
 `[flow] feedback_rounds` defaults to the number of feedback agents; `0` skips feedback. Each step
 includes the initial check and any repair verification turns in the same checker session. Those
