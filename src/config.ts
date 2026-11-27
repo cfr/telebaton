@@ -33,7 +33,7 @@ export interface ProjectCommand {
 
 export const builtinCommands = [
     'help', 'start', 'next', 'review', 'fix', 'feedback', 'continue', 'gate', 'todo', 'queue', 'plan', 'chat', 'summary', 'agents',
-    'status', 'stop', 'skip', 'log', 'roles', 'agent', 'swap', 'usage', 'diff', 'recover',
+    'status', 'stop', 'skip', 'log', 'roles', 'agent', 'swap', 'usage', 'diff', 'recover', 'maintenance',
 ];
 
 export interface GateStep {
@@ -57,6 +57,8 @@ export interface Prompts {
     planMoved: string;
     chat: string;
     summary: string;
+    maintenance: string;
+    maintenanceInit: string;
 }
 
 export interface ProjectConfig {
@@ -135,6 +137,28 @@ const defaultPrompts: Prompts = {
         'so start from the end and read back only as far as you need. Then tell me in a few short ' +
         'bullets: the goal, what is done, what it is doing right now, and any problems or open ' +
         'questions. Change nothing.',
+    maintenanceInit:
+        'Inventory this repository and propose a maintainability review campaign {campaign}. {topic}\n' +
+        'Read repository instructions, current source/test structure, contracts and pending PLAN.md work. ' +
+        'Assign every reviewable area a primary chunk, including tests, tools and authored schemas/fixtures. ' +
+        'Exclude generated output, dependencies, build trees, binary assets and historical logs. ' +
+        'Split large subsystems by responsibility so each chunk fits one agent session with callers and tests. ' +
+        'Include shared instructions, exclusions, a summary table, coverage gaps and detailed chunk sections. ' +
+        'Each chunk must state explicit primary paths, responsibilities, related tests/contracts and constraints. ' +
+        'Respect project restrictions, including any user-led areas. Do not schedule implementation tasks.',
+    maintenance:
+        'Review {id} for maintainability improvements at baseline {base}.\n\n' +
+        'Read AGENTS.md, relevant contracts and baseline PLAN.md. Find unnecessary indirection, duplicated ' +
+        'decisions/bookkeeping, unclear ownership/lifetimes/order, dead paths, overly specific code and ' +
+        'abstractions whose cost exceeds their current benefit. Inspect callers, consumers, variants and tests. ' +
+        'Prefer deletion, clear control flow and reuse of existing mechanisms. Generalize only for concrete ' +
+        'existing uses. Preserve behavior and all project invariants; separate behavior changes. ' +
+        'For test consolidation, map exact removed assertions and their failure modes to surviving coverage; ' +
+        'otherwise propose an investigation. Size, age and line savings alone are not findings. ' +
+        'Do not claim performance gains without measurements. There is no finding quota. ' +
+        'For each finding give a stable ID prefixed {id}-{tag}-, a concrete title, baseline file:line/symbol ' +
+        'evidence, maintenance cost, smallest useful change and code removed, why simpler, preserved invariants, ' +
+        'affected tests and focused validation for later, pending PLAN overlap/dependencies, confidence and missing evidence.',
 };
 
 export function expandHome(p: string): string {
@@ -289,6 +313,8 @@ export function parseProjectConfig(root: string, toml: string): ProjectConfig {
         planMoved: str(p, 'plan_moved', 'prompts', defaultPrompts.planMoved),
         chat: str(p, 'chat', 'prompts', defaultPrompts.chat),
         summary: str(p, 'summary', 'prompts', defaultPrompts.summary),
+        maintenance: str(p, 'maintenance', 'prompts', defaultPrompts.maintenance),
+        maintenanceInit: str(p, 'maintenance_init', 'prompts', defaultPrompts.maintenanceInit),
     };
 
     const commands: ProjectCommand[] = [];

@@ -48,7 +48,7 @@ function nextSection(plan: string): string[] {
 export function emptyNextMessage(plan: string): string {
     const bullets = nextSection(plan).filter((l) => l.startsWith('- ')).length;
     return bullets
-        ? `PLAN.md "Next" has ${bullets} item(s), none starting with \`- NNNN-slug:\` (e.g. \`- 0059-render-scale:\`)`
+        ? `PLAN.md "Next" has ${bullets} item(s), none starting with \`- NNNN-slug:\` (e.g. \`- 0059-normalize-input:\`)`
         : 'PLAN.md "Next" is empty';
 }
 

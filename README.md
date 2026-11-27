@@ -39,8 +39,12 @@ gets a turn. The Anthropic SDK npm dependency is still required because it is im
 Saved sessions refer to configured agent names; keep those definitions while using the sessions.
 
 The target project needs `PLAN.md` with a `## Next` list and `telebaton.toml` at its root.
-[telebaton.example.toml](telebaton.example.toml) is a starting template. Adjust its models, gate,
-and commands for your project.
+The [example/ project](example/README.md) provides short starter versions of `PLAN.md`,
+`CHANGELOG.md`, `AGENTS.md`, `MAINTENANCE.md` and `telebaton.toml`, with a working check/test gate.
+Copy it into a separate repository or adapt its files to your existing project.
+[example/telebaton.toml](example/telebaton.toml) includes all three harnesses, project commands
+and every default prompt. Its role defaults use Codex; select other aliases to mix harnesses.
+Adjust models and gate commands for your project.
 
 ## Configuration
 
@@ -86,8 +90,8 @@ Use your project's verification commands; step names are arbitrary:
 
 ```toml
 [gate]
-build = "cmake --build --preset debug"
-test = "ctest --preset debug --output-on-failure"
+check = "npm run check"
+test = "npm test"
 ```
 
 Telebaton reloads project configuration when commands such as `/next`, `/review`, and `/plan`
@@ -153,9 +157,10 @@ pausing, and `/continue feedback` resumes a failed or interrupted verification.
 Agents follow the project's instructions for commits and for moving completed tasks from
 `PLAN.md` to `CHANGELOG.md`. Telebaton does not edit those files. Gate output, commit summaries,
 and diff statistics are posted to Telegram as text. Attachments are sent only on an explicit
-`/diff` request. Long messages show their beginning and ending, preserving the final verdict;
-`/log` exports the full session locally and lists its path. Prompts are shown as
-collapsed quotes so you can inspect what the agent received.
+`/diff` or `/log <path>` request. Long messages show their beginning and ending, preserving the final verdict;
+`/log` exports the full session locally and lists its path. Task prompts are shown as
+collapsed quotes so you can inspect what the agent received. Maintenance messages show concise
+progress and result summaries; their full prompts and replies remain in the local transcripts.
 Implementation, review and planning prompts instruct agents to write commit messages to a file
 with real line breaks, validate the co-author trailer, and use `git commit -F`. This avoids
 literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritten.
@@ -177,24 +182,31 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 | `/plan [agent] [topic]` | Start or continue planning. |
 | `/plan done` | Write agreed items and commit `PLAN.md`. |
 | `/plan stop` | Alias for `/plan done`. |
+| `/maintenance init R01 [agent] [focus]` | Generate a maintenance review campaign and chunk list. |
+| `/maintenance R01.01[-R01.05] [agent]` | Review one chunk or an inclusive range sequentially, read-only. |
+| `/maintenance` | Resume the saved review queue. |
+| `/maintenance edit R01 <notes>` | Revise the generated campaign before reviews begin. |
+| `/maintenance retry R01.01 [agent]` | Start a fresh attempt, retaining previous artifacts. |
+| `/maintenance status`, `/maintenance cancel` | Inspect review progress or clear future reviews. |
 | `/chat [new] [agent] <message>` | Start or continue a separate read-only chat. |
 | `/chat stop` | Close that chat; its log stays. |
 | `/summary [role] [agent]` | Ask a fresh read-only session to summarize a session log. |
 | `/status` | Show the task, running/pending work, sessions, and last gate. |
-| `/stop [chat\|plan]` | Interrupt the active agent; an explicit target stops only that chat or planner. |
+| `/stop [chat\|plan\|maintenance]` | Interrupt the active agent, or only the explicit target. |
 | `/agents` | List configured agent aliases and models. |
 | `/usage` | Read account quotas, reset times, and available API balances. |
 | `/roles` | Show configured role defaults and current task assignments. |
 | `/roles <role> <agents...>` | Edit role defaults while idle; `/roles review ""` disables automatic review. |
 | `/swap <agent1> <agent2>` | Exchange two uniquely assigned role defaults. |
 | `/agent <alias>` | Hand off the current task's focused role, then wait for `/continue`. |
-| `/log` | Export session logs and the current finding summary. |
+| `/log [path]` | List/export session logs, or send a saved log/report as an attachment. |
 | `/diff [hash]` | Send the current task's committed diff, or a single commit's patch. |
 | `/help` | Show commands, including configured project commands. |
 
-Roles accepted by `/continue` are `implement`, `feedback`, `review`, and `plan`; `/summary` also
-accepts `chat`. Plain text goes to the focused task session. Reply to an agent's Telegram message
-to reach that session directly. Markdown replies are rendered as Telegram HTML, with plain-text
+Roles accepted by `/continue` are `implement`, `feedback`, `review`, `plan`, and `maintenance`;
+`/summary` accepts `implement`, `feedback`, `review`, `plan`, and `chat`. Plain text goes to the
+focused task session. Reply to an agent's Telegram message to reach that session directly.
+Markdown replies are rendered as Telegram HTML, with plain-text
 fallback. Telegram message network and API errors get eight retries after the initial attempt, waiting
 1, 2, 5, 10, 20, 30, 60 and 60 seconds (about three minutes plus request time). Rate-limit
 responses honor Telegram's longer `retry_after` delay. Long polling uses its own retry handling.
@@ -231,6 +243,119 @@ ordinary text keeps going to the task.
 Summaries use a fresh read-only session to read an exported log. They use `roles.summary`, default
 to the running session or otherwise the focused session, and do not disturb it. Summary sessions
 are not retained for later conversation.
+
+## Maintenance review campaigns
+
+`/maintenance` discovers maintainability improvements and produces reports for later planning.
+It uses one active session and the normal task busy lock. It does not replace the current task,
+run its gate, implement findings, or schedule work. Agents use the adapters' read-only modes;
+Telebaton writes the campaign documents, reports and transcripts from their replies.
+
+Start by generating a chunk inventory:
+
+```text
+/maintenance init R01 codex
+```
+
+If the project root contains `MAINTENANCE.md`, `init` automatically uses it as the default
+campaign-generation template, including with a custom `[prompts] maintenance_init` prompt.
+Copy [example/MAINTENANCE.md](example/MAINTENANCE.md) into your project for a short starting point.
+Its contents are saved with the generation session and reused for edits and interrupted/resumed
+generation, even if the live template changes. Optional command focus supplements the template,
+for example `/maintenance init R01 codex Focus on tests and fixture ownership`. The generator adapts
+reviewer policy inline into the campaign so snapshot reviewers do not depend on the live template.
+Projects without `MAINTENANCE.md` use the configured/built-in generation prompt as before.
+
+The agent defaults to `roles.plan`, inspects source, tests, contracts and pending work, and returns
+`wlog/R01.md` (under the configured `[logs] dir`). The document has shared review instructions,
+exclusions, a summary table and detailed chunk sections. Each chunk should fit one review session
+with its callers and tests. Telegram shows a brief summary, the available chunk range, chunk IDs
+and titles, and the saved path. Full scope descriptions stay in the campaign document.
+Reply to the generator's message to refine it, or use
+`/maintenance edit R01 Split the editor chunk by responsibility`. Revisions preserve the preceding
+document; an existing document is never overwritten by a new `init` command. You can also author
+the campaign directly:
+
+```markdown
+# R01 — Maintainability review
+
+## Shared constraints
+Preserve behavior. Read AGENTS.md and relevant contracts. Inspect related tests.
+
+## Chunks
+
+### R01.01 — Greeting behavior
+Primary paths: src/greet.js, test/greet.test.js. Inspect input handling and its tests.
+
+### R01.02 — Verification tooling
+Primary paths: package.json, telebaton.toml. Inspect the check/test scripts and AGENTS.md contracts.
+```
+
+Use full chunk IDs in second- through sixth-level headings, with shared instructions before
+the first chunk. Campaign IDs have two to four digits (`R01`); chunk numbers have two to four
+digits (`R01.01`). Every chunk needs a scope description and a unique number.
+
+```text
+/maintenance R01.01-R01.05 codex
+/maintenance R01.01..R01.05 glm
+/maintenance R01.01...R01.05 opus
+```
+
+All range spellings are inclusive and ascending, with full endpoints in the same campaign.
+Every selected chunk must exist exactly once before any session starts. Single chunks work too.
+Omitting the agent uses `roles.plan`. Each chunk gets a fresh session, and the range runs
+sequentially. A second reviewer runs after the first range finishes. Completed chunk/agent pairs
+are skipped, with their report paths shown; `/maintenance retry R01.01 codex` explicitly starts another
+attempt. Retrying a failed queue head retains the rest of that range.
+
+The first actual review freezes the entire campaign document and current HEAD, creates a detached
+worktree under `maintenance/R01/source/` beside the state file, and records a tracked-file inventory.
+Reviews inspect committed source only; uncommitted live changes are excluded. All subsequent chunks
+and reviewers reuse that baseline and scope, even if live implementation advances. Campaign edits
+after freezing are refused; use a new campaign for changed scope. Telebaton refuses a changed review
+snapshot. Review prompts forbid reading other reports or the live implementation tree, so initial
+reports remain independent. Reports are written to the live project's log directory, outside the
+snapshot. Do not place campaign report artifacts in the source baseline.
+
+Reports use configured agent tags, for example `wlog/R01.01-glm54.md` when `glm` has `tag = "glm54"`.
+A tag such as `reviewer` instead produces `R01.01-reviewer.md`.
+Each report records the baseline, scope hash, resolved agent/model and session, coverage, evidence-backed
+findings, investigations and examined areas where no change is justified. No findings is valid;
+missing required sections or the final completion marker is an incomplete review. Full transcripts,
+usage, raw replies and completed reports are retained as `R01.01-<tag>-attempt-N-*` artifacts.
+Generation artifacts use `R01-init-<tag>-attempt-N-*`. Final report paths are updated only after
+a successful, complete review; failed retries preserve the previous report.
+Telegram shows a short summary and finding IDs/titles, with the saved path in a code span.
+Full evidence, descriptions, coverage and validation proposals stay in the report. Range start,
+completion, pause and status messages include the selected range, current position and remaining
+queue; the original selection persists across restart and resume.
+
+Failures and incomplete replies pause the range. `/continue maintenance [notes]` resumes the same
+session; `/maintenance` also resumes a saved queue or failed startup. `/stop` pauses and interrupts
+the active review; `/stop maintenance` or `/maintenance stop` targets it explicitly. `/maintenance cancel`
+clears future chunks without interrupting the current one. `/status` and `/maintenance status` show
+progress, and `/log` exports the active transcript. Restart leaves the queue paused, follows any
+surviving turn through completion, and preserves successful artifacts. Pending owned work or an
+unknown status blocks other task phases until it settles; a failed provider is never silently
+replaced. Baseline worktrees remain available for retries and evidence inspection.
+
+Use the existing planner to consolidate reports and select a small implementation batch:
+
+```text
+/plan codex Read wlog/R01.01-codex.md and wlog/R01.01-glm54.md. Recheck against current code, merge duplicates while preserving finding IDs, and discuss proposed tasks before editing PLAN.md.
+```
+
+`/plan done` remains the explicit step that writes and commits agreed tasks. Cross-verification
+is manual in this version. `[prompts] maintenance_init` and `maintenance` customize generation and discovery;
+the read-only and output contracts are appended even with custom prompts.
+
+`/log <path>` sends the complete saved file as an attachment, for example
+`/log wlog/R01.01-codex.md`. Absolute paths, project-relative paths and bare filenames from the
+configured log directory are accepted, including paths copied with code ticks or quotes.
+Files in command-log and saved-attachment directories beside the state file can also be requested
+by path. Paths outside those log directories, including escaping symlinks, are rejected.
+The command works while an agent runs. `/log` without a path continues to export and list logs
+without uploading them.
 
 ## Account usage
 
@@ -395,9 +520,9 @@ Feedback and review return a readable report plus one fenced `telebaton-feedback
   "findings": [{
     "key": "routing",
     "category": "bug",
-    "summary": "Prediction is skipped",
-    "location": "client.cpp:234",
-    "evidence": "Late tick 99 completes after part 0 of tick 100"
+    "summary": "Queued messages are dropped",
+    "location": "queue.js:234",
+    "evidence": "An older asynchronous completion clears a newer queued message"
   }],
   "verifications": []
 }

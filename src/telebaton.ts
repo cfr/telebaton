@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { CodexAdapter } from './agents/codex.ts';
 import { ClaudeAdapter } from './agents/claude.ts';
 import { OpencodeAdapter } from './agents/opencode.ts';
@@ -30,6 +30,7 @@ import { describeError, type Messenger } from './telegram.ts';
 import { defaultRoles, editRoleDefaults, onlyRoleChanges, swapRoleDefaults } from './roles.ts';
 import { AgentLimits } from './limits.ts';
 import { NotificationOutbox } from './notifications.ts';
+import { MaintenanceFlow } from './maintenance.ts';
 
 type Busy = Role | 'gate' | `/${string}` | null;
 
@@ -41,12 +42,15 @@ const help = `/next [agent] [id] - start the next PLAN item (or a given one)
 /fix [notes] - reviewer applies fixes and commits
 /feedback [agent] - run a feedback check of the current task now (one more round)
 /skip - skip the current feedback step, then continue or finish
-/continue [role] [notes] - resume a turn that stopped early (error, /stop, restart)
+/continue [role] [notes] - resume a stopped turn, including /continue maintenance
 /gate - run the gate on the current session's commits now, then continue as after a turn
 /recover - resume a saved successful gate and retry pending notifications
 /todo [id] - list PLAN.md "Next" items (or show one in full)
 /queue - list remaining queued tasks
 /plan [agent] [topic] - planning discussion (edits PLAN.md only)
+/maintenance init R01 [agent] [focus] - generate a maintenance review campaign
+/maintenance R01.01[-R01.05] [agent] - review chunks sequentially, read-only; also accepts .. and ...
+/maintenance [status|cancel|retry R01.01 [agent]|edit R01 notes] - inspect, resume or manage reviews
 /chat [new] [agent] <message> - read-only chat about the project, alongside running work
 /chat stop - close the chat session (its log stays)
 /summary [role] [agent] - an agent reads the running (or focused) session's log and sums it up
@@ -57,8 +61,8 @@ const help = `/next [agent] [id] - start the next PLAN item (or a given one)
 /swap <agent1> <agent2> - exchange two uniquely assigned role defaults
 /agent <alias> - hand off the current task's focused role; /continue to resume
 /status - current task, step, sessions, last gate
-/stop [chat] - interrupt the running agent (or the chat)
-/log - export session logs now
+/stop [chat|plan|maintenance] - interrupt the running agent or an explicit session
+/log [path] - list session logs, or attach a saved log/report
 /diff [hash] - request the current task diff, or a single commit patch
 Plain text goes to the current session; reply to an agent message to reach that session.`;
 
@@ -96,6 +100,7 @@ export class Telebaton {
     private store: Store;
     private chat: Messenger;
     private notifications: NotificationOutbox;
+    private maintenance: MaintenanceFlow;
 
     constructor(local: LocalConfig, store: Store, chat: Messenger) {
         this.local = local;
@@ -104,6 +109,8 @@ export class Telebaton {
         this.notifications = new NotificationOutbox(store, chat);
         this.project = loadProjectConfig(local.project);
         this.adapters = { opencode: new OpencodeAdapter(local.opencodeUrl), claude: new ClaudeAdapter(), codex: new CodexAdapter(join(dirname(local.stateFile), 'codex')) };
+        this.maintenance = new MaintenanceFlow({ store, project: () => this.project, adapters: () => this.adapters,
+            notify: this.notifications, chat, directory: join(dirname(local.stateFile), 'maintenance') });
         this.jobs = new Jobs(join(dirname(local.stateFile), 'commands'));
         this.limits = new AgentLimits(local.opencodeUrl);
         chat.command('help', async () => chat.send(this.help()));
@@ -122,6 +129,7 @@ export class Telebaton {
         chat.command('gate', () => this.gateCommand());
         chat.command('recover', () => this.recoverWorkflow());
         chat.command('plan', (a) => this.plan(a));
+        chat.command('maintenance', (a) => this.maintenanceCommand(a));
         chat.command('todo', (a) => this.todo(a));
         chat.command('queue', () => this.queue());
         chat.command('chat', (a) => this.chatCommand(a));
@@ -133,9 +141,10 @@ export class Telebaton {
         chat.command('agent', (a) => this.agentCommand(a));
         chat.command('status', async () => chat.sendHtml(this.status()));
         chat.command('stop', (a) => this.stop(a));
-        chat.command('log', () => this.exportAll());
+        chat.command('log', (a) => this.logCommand(a));
         chat.command('diff', (a) => this.diffCommand(a));
-        chat.onText = (text, route) => this.text(text, route as SessionRole | undefined);
+        chat.onText = (text, route) => route === 'maintenance'
+            ? this.runMaintenance(() => this.maintenance.reply(text)) : this.text(text, route as SessionRole | undefined);
         for (const adapter of Object.values(this.adapters)) {
             adapter.onUnsolicited = (id, ev) => this.detach(this.unsolicited(id, ev));
         }
@@ -256,6 +265,7 @@ export class Telebaton {
 
     async shutdown() {
         this.shuttingDown = true;
+        await this.maintenance.shutdown();
         this.notifications.close();
         if (this.workPoll) clearInterval(this.workPoll);
         this.workPoll = undefined;
@@ -384,6 +394,7 @@ export class Telebaton {
     }
 
     private requireSettledWork() {
+        if (this.maintenance.pending) throw new Error('maintenance still has pending work; /status, /stop maintenance or /continue maintenance');
         if (this.state.workConflict) throw new Error(`${this.state.workConflict}; /gate to verify the current tree first`);
         const waiting = this.waitingRole();
         if (waiting) throw new Error(`${waiting} still has pending work; /status or /continue ${waiting}`);
@@ -397,7 +408,35 @@ export class Telebaton {
         if (this.busy) {
             throw new Error(`busy: ${this.busy} is running (/status, /stop)`);
         }
+        if (what !== '/maintenance' && this.maintenance.pending) throw new Error('maintenance still has pending work; /status or /stop maintenance');
         this.busy = what;
+    }
+
+    private async runMaintenance(work: () => Promise<void>) {
+        this.requireIdleFlow();
+        if (this.planBusy || this.state.sessions.plan?.workWait) throw new Error('planning is still in progress; wait or /stop plan');
+        if (this.waitingRole() || this.state.workConflict) this.requireSettledWork();
+        this.claim('/maintenance');
+        this.flowing++;
+        try { await work(); }
+        finally {
+            this.flowing--;
+            this.busy = null;
+            if (this.maintenance.pending) this.watchWork();
+        }
+    }
+
+    private async maintenanceCommand(args: string) {
+        this.reload();
+        if (args.trim() === 'status') { await this.notifications.send(this.maintenance.status()); return; }
+        if (args.trim() === 'cancel') { await this.maintenance.cancel(); return; }
+        if (/^stop(?:\s|$)/.test(args.trim())) {
+            const targets = args.trim().split(/\s+/).slice(1);
+            if (targets.length > 2) throw new Error('usage: /maintenance stop [chunk] [agent]');
+            await this.maintenance.stop(targets[0], targets[1]);
+            return;
+        }
+        await this.runMaintenance(() => this.maintenance.command(args));
     }
 
     private requireIdleFlow(allowCheckpoint = false) {
@@ -923,6 +962,11 @@ export class Telebaton {
     }
 
     private async continueTurn(args: string) {
+        if (/^maintenance(?:\s|$)/.test(args.trim())) {
+            this.reload();
+            await this.runMaintenance(() => this.maintenance.resume(args.trim().replace(/^maintenance\s*/, '')));
+            return;
+        }
         const words = args.trim().split(/\s+/).filter(Boolean);
         const role = words[0] && roles.includes(words[0]) ? (words.shift() as Role) : this.state.focus;
         if (role !== 'plan') this.requireIdleFlow();
@@ -1550,6 +1594,11 @@ export class Telebaton {
     }
 
     private async unsolicited(sessionId: string, ev: UnsolicitedEvent) {
+        if (this.maintenance.owns(sessionId)) {
+            await this.maintenance.unsolicited(sessionId, ev);
+            if (this.maintenance.pending) this.watchWork();
+            return;
+        }
         const found = (Object.keys(this.state.sessions) as SessionRole[]).find(
             (r) => this.state.sessions[r]?.id === sessionId,
         );
@@ -1612,6 +1661,10 @@ export class Telebaton {
 
     private async drainWork() {
         if (this.drainingWork || this.recoveringWork || this.busy || this.planBusy || this.stoppingWork) return;
+        if (this.maintenance.pending) {
+            await this.runMaintenance(() => this.maintenance.poll());
+            return;
+        }
         const role = this.waitingRole();
         if (!role) {
             if (this.workPoll) clearInterval(this.workPoll);
@@ -1910,6 +1963,7 @@ export class Telebaton {
 
     private async exportAll() {
         const done: string[] = [];
+        await this.maintenance.exportLog();
         for (const role of Object.keys(this.state.sessions) as SessionRole[]) {
             await this.exportLog(role);
             const f = this.state.sessions[role]?.logFile;
@@ -1920,11 +1974,39 @@ export class Telebaton {
         if (this.state.task && existsSync(join(dirname(this.local.stateFile), 'findings', `${this.state.task.id}.json`))) {
             done.push(this.feedbackTracker.export());
         }
+        const review = this.state.maintenance?.active;
+        if (review?.session) done.push(review.artifactBase + '-session.md');
         await this.notifications.sendHtml(done.length ? `exported:\n${done.map(code).join('\n')}` : 'no sessions');
     }
 
+    private async logCommand(args: string) {
+        let path = args.trim();
+        if (!path) { await this.exportAll(); return; }
+        this.reload();
+        // Accept paths copied from code spans, or quoted paths containing spaces.
+        if (path.length > 1 && ['`', '"', "'"].includes(path[0]) && path.at(-1) === path[0]) path = path.slice(1, -1);
+        const candidate = isAbsolute(path) ? path : resolve(path === basename(path) ? this.project.logDir : this.project.root, path);
+        let file: string;
+        try { file = realpathSync(candidate); }
+        catch { throw new Error(`log not found: ${path}`); }
+        const roots = [this.project.logDir, join(dirname(this.local.stateFile), 'commands'), join(dirname(this.local.stateFile), 'attachments')];
+        const allowed = roots.some((root) => {
+            if (!existsSync(root)) return false;
+            const within = relative(realpathSync(root), file);
+            return within !== '' && within !== '..' && !within.startsWith('..' + sep) && !isAbsolute(within);
+        });
+        if (!allowed) throw new Error('choose a file in the project log directory, command logs, or saved attachments');
+        if (!statSync(file).isFile()) throw new Error(`log path is not a file: ${path}`);
+        await this.chat.sendFile(basename(file), readFileSync(file, 'utf8'), `Log: ${path}`);
+    }
+
     private async stop(args = '') {
-        if (args && args !== 'plan' && args !== 'chat') throw new Error('usage: /stop [chat|plan]');
+        if (args && !['plan', 'chat', 'maintenance'].includes(args)) throw new Error('usage: /stop [chat|plan|maintenance]');
+        if (args === 'maintenance' || (!args && (this.busy === '/maintenance' ||
+            (!this.busy && !this.waitingRole() && (this.maintenance.pending || (!this.chatBusy && !this.planBusy && this.maintenance.hasQueue)))))) {
+            await this.maintenance.stop();
+            return;
+        }
         if (!args && this.state.taskQueue) {
             this.state.taskQueue.paused = true;
             this.store.save();
@@ -2194,6 +2276,7 @@ export class Telebaton {
             `task: ${escapeHtml(s.task?.id ?? '-')}`,
             `running: ${escapeHtml(this.runningTask() ?? 'nothing')}${this.planBusy ? ' (plan answering)' : ''}${this.chat.pendingQuestions() ? ` (${this.chat.pendingQuestions()} question(s) waiting)` : ''}`,
             `focus: ${s.focus ?? '-'}${this.chatBusy ? ' (chat answering)' : ''}`,
+            ...(s.maintenance ? [escapeHtml(this.maintenance.status())] : []),
             ...(s.taskQueue ? [`task queue${s.taskQueue.paused ? ' (paused)' : ''}: ${escapeHtml(s.taskQueue.ids.join(', ') || 'last task in progress')}`] : []),
             ...(s.workConflict ? [`verification required: ${escapeHtml(s.workConflict)}`] : []),
             ...(s.gateContinuation ? ['workflow recovery pending; /recover to resume from the saved gate'] : []),
@@ -2247,8 +2330,9 @@ export class Telebaton {
             }
             await this.recoverPendingWork();
             await this.recoverTurns();
+            await this.maintenance.recover();
         } finally { this.recoveringWork = false; }
-        if (this.waitingRole()) this.watchWork();
+        if (this.waitingRole() || this.maintenance.pending) this.watchWork();
         await this.drainWork();
     }
 }

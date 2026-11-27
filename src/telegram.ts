@@ -337,7 +337,7 @@ export class Chat implements Messenger {
             if (e instanceof GrammyError && e.error_code === 409) {
                 throw new Error(
                     'Another process is polling this bot token (409 Conflict). ' +
-                        'Stop opencode-telegram-bot first; the token is shared.',
+                        'Stop any other bot or Telebaton process polling this token.',
                 );
             }
             throw e;

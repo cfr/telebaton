@@ -1,23 +1,25 @@
-# Project configuration: which agents
-# implement, check, review and plan, the verification gate it runs after every committing turn,
-# the prompts it sends, and project commands (/deploy, /serve) that only run when sent from the
-# chat. Telebaton re-reads it when a command starts (/next, /review, /plan...), so edits apply
-# without a restart.
-
-# Telebaton records this gate result for checkers; unchanged green trees need no full rerun.
-# Replace the tools/* commands below with your project's own scripts.
-[gate]
-build = "cmake --build --preset debug"
-test = "ctest --preset debug --output-on-failure"
-
+# Project configuration. Pick models available to your accounts before using each agent.
+# Role defaults below use only Codex; the other harnesses are optional.
 [roles]
-implement = "glm"
-# one agent or a list: round n of the feedback checks goes to the nth, the last one repeating
-feedback = ["dsf", "glm"]
-# Set to "" (or omit) to finish after feedback; /review <agent> still works manually.
-review = "opus"
-plan = "opus"
+implement = "codex"
+feedback = ["codex"]
+# Set to an agent alias to enable automatic review; /review <agent> also works manually.
+review = ""
+plan = "codex"
+# chat defaults to plan; summary defaults to chat.
+# To mix harnesses, replace the assignments above, for example:
+# implement = "glm"
+# feedback = ["dsf", "codex"]
+# review = "opus"
+# plan = "codex"
 
+[agents.codex]
+harness = "codex"
+model = "your-model-id"
+effort = "high"
+tag = "codex"
+
+# OpenCode: provider/model IDs and an optional variant.
 [agents.glm]
 harness = "opencode"
 model = "zai-coding-plan/glm-5.4"
@@ -36,39 +38,46 @@ model = "deepseek/deepseek-flash"
 variant = "default"
 tag = "deepseek41flash"
 
+# Claude Code: model ID, optional effort and permission_mode.
 [agents.opus]
 harness = "claude"
 model = "claude-opus-5-5"
 effort = "medium"
+# permission_mode = "auto"
 tag = "opus55"
 
-# Replace model with a Codex model available to your account.
-[agents.codex]
-harness = "codex"
-model = "gpt-6.2-sol"
-effort = "high"
-tag = "sol62"
+# Replace these commands when adapting this starter to your own project.
+[gate]
+check = "npm run check"
+test = "npm test"
 
 [flow]
-# Feedback steps before review; each checker verifies its repairs within its own step.
-# Defaults to the length of roles.feedback; 0 skips feedback.
-feedback_rounds = 2
+# Defaults to the number of feedback agents; set 0 to skip feedback.
+feedback_rounds = 1
 
 [logs]
 dir = "wlog"
 
-[commands.deploy]
-cmd = "tools/deploy"
-description = "deploy the project"
-confirm = true
+# Project commands run only when explicitly requested.
+[commands.verify]
+cmd = "npm run check && npm test"
+description = "run the example checks and tests"
+aliases = ["checks"]
 
-[commands.serve]
-cmd = "tools/serve"
-description = "start the development server"
-background = true
-ready = "listening"
-aliases = ["server"]
+# Optional deployment and background-server examples; supply your own scripts first.
+# [commands.deploy]
+# cmd = "tools/deploy"
+# description = "deploy the project"
+# confirm = true
+#
+# [commands.serve]
+# cmd = "tools/serve"
+# description = "start the development server"
+# background = true
+# ready = "listening"
+# aliases = ["server"]
 
+# Optional prompt overrides. These are the defaults; remove this section to inherit them.
 [prompts]
 implement = "please do {id}"
 review = "please review {id}"
@@ -135,3 +144,26 @@ Read {log}: the log of the {role} session for {task}, which is {state}. It can b
 so start from the end and read back only as far as you need. Then tell me in a few short \
 bullets: the goal, what is done, what it is doing right now, and any problems or open \
 questions. Change nothing."""
+maintenance_init = """
+Inventory this repository and propose a maintainability review campaign {campaign}. {topic}
+Read repository instructions, current source/test structure, contracts and pending PLAN.md work. \
+Assign every reviewable area a primary chunk, including tests, tools and authored schemas/fixtures. \
+Exclude generated output, dependencies, build trees, binary assets and historical logs. \
+Split large subsystems by responsibility so each chunk fits one agent session with callers and tests. \
+Include shared instructions, exclusions, a summary table, coverage gaps and detailed chunk sections. \
+Each chunk must state explicit primary paths, responsibilities, related tests/contracts and constraints. \
+Respect project restrictions, including any user-led areas. Do not schedule implementation tasks."""
+maintenance = """
+Review {id} for maintainability improvements at baseline {base}.
+
+Read AGENTS.md, relevant contracts and baseline PLAN.md. Find unnecessary indirection, duplicated \
+decisions/bookkeeping, unclear ownership/lifetimes/order, dead paths, overly specific code and \
+abstractions whose cost exceeds their current benefit. Inspect callers, consumers, variants and tests. \
+Prefer deletion, clear control flow and reuse of existing mechanisms. Generalize only for concrete \
+existing uses. Preserve behavior and all project invariants; separate behavior changes. \
+For test consolidation, map exact removed assertions and their failure modes to surviving coverage; \
+otherwise propose an investigation. Size, age and line savings alone are not findings. \
+Do not claim performance gains without measurements. There is no finding quota. \
+For each finding give a stable ID prefixed {id}-{tag}-, a concrete title, baseline file:line/symbol \
+evidence, maintenance cost, smallest useful change and code removed, why simpler, preserved invariants, \
+affected tests and focused validation for later, pending PLAN overlap/dependencies, confidence and missing evidence."""

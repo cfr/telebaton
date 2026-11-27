@@ -9,12 +9,12 @@ const plan = `# plan
 
 Each item stays small.
 
-- 0048-antlion: a fixed ambusher
+- 0048-parser: parse input
   - detail one
 
-  Files: \`a.cpp\`
+  Files: \`parser.js\`
 
-- 0049-antlion-flick: flicks sand
+- 0049-parser-errors: report invalid input
 - not an item
 
 ## Research
@@ -24,11 +24,11 @@ Each item stays small.
 
 test('parses Next items with continuation lines', () => {
     const items = parseNext(plan);
-    assert.deepEqual(items.map((i) => i.id), ['0048-antlion', '0049-antlion-flick']);
+    assert.deepEqual(items.map((i) => i.id), ['0048-parser', '0049-parser-errors']);
     assert.equal(items[0].number, '0048');
-    assert.match(items[0].text, /Files: `a.cpp`$/);
-    assert.equal(items[1].text, '- 0049-antlion-flick: flicks sand');
-    assert.equal(summary(items[0]), '0048-antlion: a fixed ambusher');
+    assert.match(items[0].text, /Files: `parser.js`$/);
+    assert.equal(items[1].text, '- 0049-parser-errors: report invalid input');
+    assert.equal(summary(items[0]), '0048-parser: parse input');
 });
 
 test('task ranges are inclusive, ascending and require unique planned numbers', () => {
@@ -40,27 +40,27 @@ test('task ranges are inclusive, ascending and require unique planned numbers', 
     assert.throws(() => taskRange(items, '0049..0048'), /ascending/);
     assert.throws(() => taskRange(items, '0048..0050'), /0050.*found 0/);
     assert.throws(() => taskRange([...items, items[0]], '0048..0049'), /0049.*found 2/);
-    for (const range of ['48.49', '48....49', '0048-antlion', '48-49x', '10048-10049']) {
+    for (const range of ['48.49', '48....49', '0048-parser', '48-49x', '10048-10049']) {
         assert.throws(() => taskRange(items, range), /inclusive task range/);
     }
 });
 
 test('queued task errors explain renumbering, removal, duplicate IDs and recovery', () => {
     const items = parseNext(plan);
-    assert.equal(queuedTask(items, '0048-antlion'), items[0]);
-    const revised = parseNext(plan.replace('0048-antlion:', '0048-new-format:').replace('0049-antlion-flick:', '0051-antlion:'));
-    assert.throws(() => queuedTask(revised, '0048-antlion'), (e: Error) => {
+    assert.equal(queuedTask(items, '0048-parser'), items[0]);
+    const revised = parseNext(plan.replace('0048-parser:', '0048-new-format:').replace('0049-parser-errors:', '0051-parser:'));
+    assert.throws(() => queuedTask(revised, '0048-parser'), (e: Error) => {
         assert.match(e.message, /PLAN.md Next changed/);
-        assert.match(e.message, /Queued task: 0048-antlion \(no longer exists\)/);
+        assert.match(e.message, /Queued task: 0048-parser \(no longer exists\)/);
         assert.match(e.message, /Current entry for 0048: 0048-new-format/);
-        assert.match(e.message, /same task name now appears as: 0051-antlion/);
+        assert.match(e.message, /same task name now appears as: 0051-parser/);
         assert.match(e.message, /check the revised plan and endpoint/);
         assert.match(e.message, /confirm a replacement range/);
         assert.match(e.message, /next alone retries the saved IDs/);
         return true;
     });
-    assert.throws(() => queuedTask([], '0048-antlion'), /Current entry for 0048: \(none\)/);
-    assert.throws(() => queuedTask([...items, items[0]], '0048-antlion'), /appears 2 times/);
+    assert.throws(() => queuedTask([], '0048-parser'), /Current entry for 0048: \(none\)/);
+    assert.throws(() => queuedTask([...items, items[0]], '0048-parser'), /appears 2 times/);
 });
 
 test('chunks long text at newlines', () => {
@@ -77,9 +77,9 @@ test('explains a Next section whose items lack ids', () => {
 });
 
 test('accepts an item heading with a parenthesized title', () => {
-    const items = parseNext('## Next\n\n- 0064-beetle (rhinoceros beetle): the tank\n- 0065-x-y: z\n');
-    assert.deepEqual(items.map((i) => i.id), ['0064-beetle', '0065-x-y']);
-    assert.equal(summary(items[0]), '0064-beetle: (rhinoceros beetle): the tank');
+    const items = parseNext('## Next\n\n- 0064-formatter (output formatter): format output\n- 0065-x-y: z\n');
+    assert.deepEqual(items.map((i) => i.id), ['0064-formatter', '0065-x-y']);
+    assert.equal(summary(items[0]), '0064-formatter: (output formatter): format output');
 });
 
 test('reports parsed Next ids and items it would skip', () => {

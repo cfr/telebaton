@@ -46,7 +46,7 @@ interface Harness {
 }
 const feedback = (findings: unknown[], verifications: unknown[] = [], verdict = findings.length ? 'findings' : 'clean') =>
     'Report.\n```telebaton-feedback\n' + JSON.stringify({ findings, verifications, verdict }) + '\n```\nVERDICT: ' + verdict;
-const finding = { key: 'bug', category: 'bug', summary: 'Routing skips prediction', location: 'code.txt:1', evidence: 'late arrival probe fails' };
+const finding = { key: 'bug', category: 'bug', summary: 'Routing drops messages', location: 'code.txt:1', evidence: 'late arrival probe fails' };
 const answer = 'Fixed.\n```telebaton-dispositions\n' + JSON.stringify({ dispositions: [{ id: '0170-F01', status: 'fixed', reason: 'Regression fails without fix' }] }) + '\n```';
 
 function setup(feedbackReplies: string[], defaults: { review?: string; feedback?: string[] } = {}) {
@@ -915,7 +915,7 @@ test('an existing review can submit a legacy report after switching to Telebaton
 
 test('discussion after a completed review stays conversational and does not trigger report retries', async () => {
     const f = setup([feedback([]), feedback([]), feedback([])]);
-    f.setReviewReplies([feedback([finding]), 'The routing decision uses the wrong tick source.']);
+    f.setReviewReplies([feedback([finding]), 'The routing decision uses the wrong sequence number.']);
     try {
         await f.h.afterImplementGate();
         await f.h.continueTurn('review explain the finding');

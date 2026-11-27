@@ -53,7 +53,7 @@ test('parses agents, roles, ordered gate and default prompts', () => {
     assert.equal(c.roles.review, 'opus');
     assert.equal(c.roles.summary, c.roles.chat);
     assert.equal(c.logDir, '/repo/wlog');
-    assert.equal(fill(c.prompts.implement, { id: '0048-antlion' }), 'please do 0048-antlion');
+    assert.equal(fill(c.prompts.implement, { id: '0048-parser' }), 'please do 0048-parser');
 });
 
 test('rejects duplicate tags, unknown roles and bad opencode models', () => {
@@ -105,6 +105,7 @@ aliases = ["server"]
     assert.throws(() => parseProjectConfig('/r', base + '[commands.diff]\ncmd = "x"\n'), /built-in/);
     assert.throws(() => parseProjectConfig('/r', base + '[commands.queue]\ncmd = "x"\n'), /built-in/);
     assert.throws(() => parseProjectConfig('/r', base + '[commands.recover]\ncmd = "x"\n'), /built-in/);
+    assert.throws(() => parseProjectConfig('/r', base + '[commands.maintenance]\ncmd = "x"\n'), /built-in/);
     assert.throws(() => parseProjectConfig('/r', base + '[commands.Deploy]\ncmd = "x"\n'), /lowercase/);
     assert.deepEqual(c.commands.map((x) => x.aliases), [[], ['server']]);
     assert.throws(() => parseProjectConfig('/r', base + extra.replace('["server"]', '["deploy"]')), /already taken/);
@@ -114,13 +115,17 @@ aliases = ["server"]
 });
 
 test('the example spells out every prompt as its default', () => {
-    const example = readFileSync(new URL('../telebaton.example.toml', import.meta.url), 'utf8');
+    const example = readFileSync(new URL('../example/telebaton.toml', import.meta.url), 'utf8');
+    const configured = parseProjectConfig('/p', example);
+    assert.deepEqual(new Set([...configured.agents.values()].map((a) => a.harness)), new Set(['codex', 'opencode', 'claude']));
+    assert.equal(configured.roles.implement, 'codex');
+    assert.deepEqual(configured.gate.map((g) => g.cmd), ['npm run check', 'npm test']);
     const bare = example.replace(/^\[prompts\][\s\S]*?(?=^\[|(?![\s\S]))/m, '');
     assert.notEqual(bare, example);
-    assert.equal(parseProjectConfig('/p', example).prompts.fixNotes, 'please fix {notes}; then commit');
-    assert.deepEqual(parseProjectConfig('/p', example).prompts, parseProjectConfig('/p', bare).prompts);
+    assert.equal(configured.prompts.fixNotes, 'please fix {notes}; then commit');
+    assert.deepEqual(configured.prompts, parseProjectConfig('/p', bare).prompts);
     const keys = [...example.matchAll(/^(\w+) = /gm)].map((m) => m[1]);
-    for (const k of ['implement', 'review', 'fix', 'fix_notes', 'feedback', 'feedback_again', 'feedback_fix', 'continue', 'gate_failed', 'plan', 'plan_done', 'plan_read_only', 'plan_moved', 'chat', 'summary']) {
+    for (const k of ['implement', 'review', 'fix', 'fix_notes', 'feedback', 'feedback_again', 'feedback_fix', 'continue', 'gate_failed', 'plan', 'plan_done', 'plan_read_only', 'plan_moved', 'chat', 'summary', 'maintenance', 'maintenance_init']) {
         assert.ok(keys.includes(k), k);
     }
 });

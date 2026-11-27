@@ -7,16 +7,16 @@ Status: prototype (see README "Status").
 
 ## Task ids
 
-Every task has an id `<task-number>-<few-words-description>`, e.g. `0038-capsule-primitives`:
-the number is the `PLAN.md` "Next" item and the commit tag (`#0038`), the words are a short
+Every task has an id `<task-number>-<few-words-description>`, e.g. `0002-trim-names`:
+the number is the `PLAN.md` "Next" item and the commit tag (`#0002`), the words are a short
 kebab-case slug. The id names everything the task produces:
 
-- agent session titles: `0038-capsule-primitives` (implementation), `0038-capsule-primitives
-  feedback` (feedback checks), `0038-capsule-primitives review` (review and fixes)
+- agent session titles: `0002-trim-names` (implementation), `0002-trim-names
+  feedback` (feedback checks), `0002-trim-names review` (review and fixes)
 - logs: `wlog/<id>[-<step>]-<agent-log-name>.md` (see "Logs")
-- commits: tagged `#0038` as `AGENTS.md` requires
+- commits: tagged `#0002` as `AGENTS.md` requires
 
-The id is the PLAN item's heading (`0038-capsule-primitives`); `/next` shows it with the item
+The id is the PLAN item's heading (`0002-trim-names`); `/next` shows it with the item
 text before work starts.
 
 ## Agents
@@ -30,8 +30,8 @@ only when the new variable is unset.
 
 ```toml
 [gate]
-build = "cmake --build --preset debug"
-test = "ctest --preset debug --output-on-failure"
+check = "npm run check"
+test = "npm test"
 
 [roles]
 implement = "glm"
@@ -65,12 +65,12 @@ tag = "opus55"
   e.g. `low`/`high`/`max` thinking); checked against opencode's model list when a session starts.
 - `[prompts]` overrides the text sent at each step (`implement`, `review`, `fix`, `fix_notes`,
   `feedback`, `feedback_again`, `feedback_fix`, `continue`, `gate_failed`, `plan`, `plan_done`,
-  `plan_read_only`, `plan_moved`, `chat`, `summary`; `telebaton.example.toml` lists the
+  `plan_read_only`, `plan_moved`, `chat`, `summary`; `example/telebaton.toml` lists the
   defaults); `{id}`, `{num}`, `{base}`, `{notes}`, `{step}`, `{output}`, `{findings}`, `{reply}`,
   `{topic}`, `{message}`, `{log}`, `{role}`, `{task}`, `{state}`, `{running}` and `{commits}` are
   filled in. `[logs] dir` sets the log directory (default `wlog`).
 - `tag` names the model everywhere it shows: the suffix in `wlog/` file names (so existing
-  names like `glm53` and `opus55` carry on) and the prefix of chat messages (`[glm53 0038]`).
+  names like `glm53` and `opus55` carry on) and the prefix of chat messages (`[glm53 0002]`).
 - `[gate]` is the verification the bridge runs after each committing step, in order; a
   non-zero exit fails it.
 - Machine-specific settings stay out of the repo, in the bridge's own gitignored
@@ -154,7 +154,7 @@ Each request has a 60-second timeout. `sendDocument` retries only explicit 429 r
 rejections: network and server errors leave delivery uncertain and must not cause automatic
 duplicate uploads. `Chat.sendFile` catches Telegram delivery failures, archives the content under
 `attachments/` beside the state file, and reports the failure to stderr with a best-effort text
-warning. It returns without awaiting the warning. Only `/diff` calls `sendFile`; normal flow,
+warning. It returns without awaiting the warning. Only explicit `/diff` and `/log <path>` call `sendFile`; normal flow,
 including gate failures, long reports and planning/config confirmations, never uploads files.
 Unrelated programming errors still propagate.
 
@@ -172,6 +172,10 @@ Unrelated programming errors still propagate.
 - `/gate`: run the gate on the current session's commits by hand, then continue as after a turn
 - `/todo [id]`: list the `PLAN.md` "Next" items, or show one in full
 - `/plan [agent] [topic]`, `/plan done` (also `/plan stop`): a planning discussion (see below)
+- `/maintenance init R01 [agent] [focus]`: generate a maintenance review campaign and chunk inventory.
+  `/maintenance R01.01[-R01.05] [agent]` reviews chunks sequentially; `..` and `...` also work.
+  `/continue maintenance`, `/stop maintenance`, `/maintenance status`, `/maintenance retry R01.01 [agent]`,
+  `/maintenance edit R01 <notes>` and `/maintenance cancel` manage campaign revisions, retries and the queue.
 - `/chat [new] [agent] <message>`, `/chat stop`, `/summary [role] [agent]`: see "Chat"
 - `/agents`: list configured agent aliases and models
 - `/usage`: read live account quota windows, reset times, and API balances independently of task
@@ -202,10 +206,44 @@ Unrelated programming errors still propagate.
   `/roles`, preserving unrelated configuration and accumulated kept role changes.
 - `/status`: current task, step, which agent is running, last gate result
 - `/stop [chat|plan]`: interrupt the running agent (or the chat, or the planner)
-- `/log`: export the current sessions to `wlog/` now
+- `/log [path]`: export/list the current sessions, or attach a saved file from project logs,
+  command logs or attachment backups. Resolve canonical paths to reject traversal and escaping symlinks.
 - `/<name> [args]`, `/<name> stop`: project commands from `[commands]` (see README)
 - plain text: goes to the agent of the current step; a Telegram reply to an agent's message goes
   to that message's session, whatever the current step is
+
+## Maintenance discovery
+
+`MaintenanceFlow` owns one read-only campaign-generation/review session at a time, sharing the
+task-flow busy lock without replacing task state. Campaign manifests live at `<logs>/R01.md`;
+chunk headings such as `R01.01` identify independent scopes. The first review freezes the
+manifest and HEAD, prepares a detached worktree beside the state file, and saves a tracked-file
+inventory. All reviewers reuse that snapshot; discovery prompts never include peer reports.
+Generation runs before that freeze and supports conversational revisions saved by the orchestrator.
+When present, project-root `MAINTENANCE.md` supplies the default generation template. Its text
+is captured in the generation attempt and appended independently of configurable prompts, along
+with command focus. Edits and resumed generation reuse that captured text. The generator adapts
+reviewer policy inline into the campaign; later discovery sessions need no live-template access.
+
+`state.maintenance` stores campaigns, selected baseline/scope, resolved agent configurations, a
+sequential range queue, the active attempt, and archived attempts. Each attempt records session,
+cwd, timing, pending work, outcome, reply and artifact paths. This is separate from task queues,
+gates and the feedback ledger. Agent sessions remain read-only; the orchestrator publishes a
+report only after successful completion, owned work settling, and validation of the required
+sections/completion marker. Original replies, transcripts, usage and completed attempts remain
+available when a review is retried. Provider failures are never silently substituted or retried.
+Telegram receives deterministic previews extracted from Markdown: campaign overview, range and
+chunk titles, or review summary and finding titles. Detailed evidence and scopes stay in the
+artifacts; no additional model call is needed for a preview. New prompts request a short Summary
+section and stable item headings, with fallbacks for older reports. Maintenance prompts are kept
+in transcripts rather than echoed to Telegram. The queue preserves its original selected IDs
+alongside remaining IDs so notices retain the full range and current position after resume.
+
+Stop and failures pause the queue. Startup pauses it too, recovers the active turn through the
+adapter, and captures a missed completion without another model call. Unknown status holds the
+work barrier. `/continue maintenance` resumes the current attempt; `/maintenance retry` creates a fresh
+attempt; `/maintenance` resumes the queue. The normal planner reads resulting reports, reconciles
+them with current code, and schedules only at the user's explicit request.
 
 ## Logs
 
@@ -226,9 +264,7 @@ idle, so `wlog/` is always current, even for a task that is abandoned halfway. T
   through its different suffix; a restart with the same agent overwrites the file, and the
   bridge says so.
 
-Both harnesses are rendered by the bridge into one markdown shape, the one opencode's `/export`
-produces today (the renderer reproduces `0047-sand-pits-glm53.md` byte for byte from the session
-export):
+All harness transcripts are rendered by the bridge into one common Markdown shape:
 
     # <session title>
     **Session ID:** ... **Created:** ... **Updated:** ... **Tokens:** ...
@@ -339,7 +375,7 @@ Agents block in two ways and both must reach the chat:
   reply to it) continues that session. A question at the end of the implementation turn holds
   the gate and auto-review until I answer or send `/review`.
 
-Every agent message is prefixed with the agent tag and task (`[glm53 0038]`, `[opus55 0038]`) so
+Every agent message is prefixed with the agent tag and task (`[glm53 0002]`, `[opus55 0002]`) so
 one chat stays readable.
 
 ## Chat
@@ -383,13 +419,11 @@ landed starts with `plan_moved` (their list), so the agent re-reads `PLAN.md` be
   harness. It relays and runs commands; it never paraphrases agent output.
 - Telegram credentials (`[telegram] token`, `allowed_user_id`) live in the bridge's
   `config.toml`. Telegram allows one `getUpdates` poller per token (a second gets `409
-  Conflict`), so the bridge and opencode-telegram-bot cannot run at the same time on one token.
-  For now they share it: stop the old bot while the bridge runs. If both are needed at once
-  later, register a second bot and give the bridge its token with the same allowed user id.
+  Conflict`). Stop other processes polling the same token before starting Telebaton.
+  Independently running bots need separate tokens.
 - `opencode` adapter (v2 HTTP API): turn end is `session.execution.{succeeded,failed,
   interrupted}` on `/api/event`, with a `GET /api/session/{id}` poll as fallback; questions are
-  `permission.asked` and `form.created`. It talks to the shared background service the way
-  `~/Code/opencode-telegram-bot/otg.sh` does (`opencode service start`,
+  `permission.asked` and `form.created`. It talks to the shared background service (`opencode service start`,
   `http://127.0.0.1:49374`, password from `opencode service get password`), not a private
   `opencode serve`, so bridge sessions also show up in the TUI.
 - `claude` adapter: Claude Code via the Agent SDK, one `query()` per turn (`sessionId` on the

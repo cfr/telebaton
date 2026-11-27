@@ -1,0 +1,12 @@
+{
+  "name": "telebaton-starter",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "node --check src/greet.js",
+    "test": "node --test test/greet.test.js"
+  }
+}

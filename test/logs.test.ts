@@ -7,9 +7,9 @@ import { fromOpencode } from '../src/logs/opencode.ts';
 test('opencode export renders in the /export layout', () => {
     const md = renderMarkdown(
         fromOpencode({
-            info: { id: 'ses_1', title: '0048-antlion', time: { created: 0, updated: 0 } },
+            info: { id: 'ses_1', title: '0048-parser', time: { created: 0, updated: 0 } },
             messages: [
-                { type: 'user', text: 'please do 0048-antlion' },
+                { type: 'user', text: 'please do 0048-parser' },
                 {
                     type: 'assistant',
                     content: [
@@ -25,7 +25,7 @@ test('opencode export renders in the /export layout', () => {
     const body = md.slice(md.indexOf('## User'));
     assert.equal(
         body,
-        '## User\n\nplease do 0048-antlion\n\n---\n\n' +
+        '## User\n\nplease do 0048-parser\n\n---\n\n' +
             '## Assistant\n\n_Thinking:_\n\nlook at PLAN\n\n**Tool: read**\n\n**Input:**\n```json\n{\n  "path": "PLAN.md"\n}\n```\n\nok\n\n\n---\n\n' +
             '## Assistant\n\ndone\n',
     );
@@ -33,7 +33,7 @@ test('opencode export renders in the /export layout', () => {
 
 test('claude transcript groups assistant blocks and pairs tool results', () => {
     const lines = [
-        { type: 'custom-title', customTitle: '0048-antlion review' },
+        { type: 'custom-title', customTitle: '0048-parser review' },
         { type: 'user', timestamp: '2026-10-18T10:00:00Z', message: { content: 'please review 0048' } },
         { type: 'assistant', timestamp: '2026-10-18T10:00:01Z', message: { content: [{ type: 'thinking', thinking: '' }] } },
         { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'git log' } }] } },
@@ -43,7 +43,7 @@ test('claude transcript groups assistant blocks and pairs tool results', () => {
         { type: 'assistant', timestamp: '2026-10-18T10:00:05Z', message: { content: [{ type: 'text', text: 'Findings' }] } },
     ];
     const t = fromClaudeJsonl('uuid', lines.map((l) => JSON.stringify(l)).join('\n') + '\n{"partial');
-    assert.equal(t.title, '0048-antlion review');
+    assert.equal(t.title, '0048-parser review');
     assert.equal(t.messages.length, 2);
     assert.deepEqual(t.messages[1].parts.map((p) => p.kind), ['thinking', 'tool', 'text']);
     assert.equal((t.messages[1].parts[1] as { output: string }).output, 'abc');
@@ -55,9 +55,9 @@ test('opencode steps add up to the header and per-turn token lines', () => {
     const step = (read: number) => ({ type: 'assistant', content: [{ type: 'text', text: 'x' }], tokens: { input: 10, output: 5, reasoning: 1, cache: { read, write: 0 } } });
     const md = renderMarkdown(
         fromOpencode({
-            info: { id: 'ses_1', title: '0048-antlion', time: { created: 0, updated: 0 } },
+            info: { id: 'ses_1', title: '0048-parser', time: { created: 0, updated: 0 } },
             messages: [
-                { type: 'user', text: 'please do 0048-antlion' },
+                { type: 'user', text: 'please do 0048-parser' },
                 step(1000),
                 step(2000),
                 { type: 'compaction' },

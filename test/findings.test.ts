@@ -8,7 +8,7 @@ import { applyFeedback, applyDispositions, findingStats, findingSummary, hasFeed
 const checker: Source = { agent: 'dsf', model: 'deepseek/flash', session: 'check', sha: 'abc', log: '/project/wlog/task-check.md' };
 const implementer: Source = { ...checker, agent: 'kimi', model: 'kimi/pro', session: 'impl', sha: 'def' };
 const ledger = (): Ledger => ({ version: 1, task: '0169-late-events', findings: [], reports: [] });
-const finding = (key = 'bug1') => ({ key, category: 'bug', summary: 'Prediction skipped', location: 'client.cpp:234', evidence: '100-part0 then 99-part0/1 reproduces it' });
+const finding = (key = 'bug1') => ({ key, category: 'bug', summary: 'Queued message dropped', location: 'queue.js:234', evidence: 'An older completion clears a newer queued message' });
 const report = (findings: unknown[], verifications: unknown[] = [], verdict = findings.length ? 'findings' : 'clean') =>
     'Readable explanation.\n```telebaton-feedback\n' + JSON.stringify({ verdict, findings, verifications }) + '\n```\nVERDICT: ' + verdict;
 const answers = (dispositions: unknown[]) => '```telebaton-dispositions\n' + JSON.stringify({ dispositions }) + '\n```';

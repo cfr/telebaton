@@ -4,6 +4,7 @@ import type { PendingWorkState, TurnResult } from './agents/types.ts';
 import type { Role, SessionRole } from './config.ts';
 import type { PlanItem } from './plan.ts';
 import type { Notification } from './notifications.ts';
+import type { MaintenanceState } from './maintenance.ts';
 
 export interface SessionRef {
     agent: string;
@@ -49,6 +50,7 @@ export interface GateRecord {
 }
 
 export interface State {
+    maintenance?: MaintenanceState;
     task?: PlanItem;
     taskComplete?: boolean;
     taskQueue?: { ids: string[]; agent?: string; paused?: boolean; current?: string };
