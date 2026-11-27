@@ -539,6 +539,7 @@ export class MaintenanceFlow {
         }
         if (a.status !== 'completed' && this.state.queue) this.state.queue.paused = true;
         this.store.save();
+        if (this.store.state.abort?.target === 'maintenance') return;
         if (a.status === 'completed') {
             const document = a.kind === 'init' ? readFileSync(a.outputFile, 'utf8') : undefined;
             const brief = document !== undefined
@@ -598,6 +599,43 @@ export class MaintenanceFlow {
         }
         this.store.save();
         await this.notify.send(this.withProgress('maintenance queue paused; /continue maintenance to resume, /maintenance cancel to clear remaining reviews'));
+    }
+
+    async stopForAbort() {
+        this.stopping = true;
+        if (this.state.queue) this.state.queue.paused = true;
+        this.store.save();
+        const a = this.state.active;
+        if (a?.session) await this.session(a).interrupt();
+    }
+
+    get abortSessions() {
+        const a = this.store.state.maintenance?.active;
+        return a?.session ? [{ id: a.session, agent: a.agent, cwd: a.cwd, title: a.title, pendingWorkState: a.pendingWorkState }] : [];
+    }
+
+    async abortReady(): Promise<boolean> {
+        if (this.sending) return false;
+        const a = this.store.state.maintenance?.active;
+        if (!a?.session) return true;
+        const session = this.session(a);
+        if ((await session.turnState(a.since ?? 0)).running) return false;
+        const work = await session.pendingWork();
+        if (work.some((w) => w.kind !== 'subagent' || !w.terminal)) return false;
+        await this.exportLog();
+        return true;
+    }
+
+    async discardAborted() {
+        const a = this.store.state.maintenance?.active;
+        if (a?.session) await this.session(a).discard?.();
+        if (this.store.state.maintenance) {
+            this.state.active = undefined;
+            this.state.queue = undefined;
+        }
+        this.live = undefined;
+        this.stopping = false;
+        this.store.save();
     }
 
     async cancel() {

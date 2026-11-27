@@ -58,9 +58,18 @@ export class OpencodeAdapter implements Adapter {
         });
         const text = await res.text();
         if (!res.ok) {
-            throw new Error(`opencode ${method} ${path}: ${res.status} ${text.slice(0, 300)}`);
+            const error = new Error(`opencode ${method} ${path}: ${res.status} ${text.slice(0, 300)}`) as Error & { status: number };
+            error.status = res.status;
+            throw error;
         }
         return (text ? JSON.parse(text) : undefined) as T;
+    }
+
+    async discard(id: string) {
+        try { await this.api('DELETE', `/api/session/${encodeURIComponent(id)}`); }
+        catch (error) { if ((error as { status?: number }).status !== 404) throw error; }
+        this.askers.delete(id);
+        this.cancelWaiter(id);
     }
 
     private ensureEvents() {
@@ -322,6 +331,8 @@ class OpencodeSession implements AgentSession {
     async interrupt(): Promise<void> {
         await this.work.interrupt();
     }
+
+    async discard(): Promise<void> { await this.oc.discard(this.id); }
 
     async setReadOnly(on: boolean): Promise<void> {
         await this.oc.api('POST', `/api/session/${this.id}/agent`, { agent: on ? 'plan' : 'build' });

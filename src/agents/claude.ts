@@ -30,6 +30,7 @@ const readOnlyDenied = ['ExitPlanMode', 'Edit', 'Write', 'MultiEdit', 'NotebookE
 
 class ClaudeSession implements AgentSession {
     private abort: AbortController | null = null;
+    private closed = false;
     readonly agent: AgentConfig;
     readonly id: string;
     private opts: SessionOptions;
@@ -85,6 +86,7 @@ class ClaudeSession implements AgentSession {
     };
 
     async send(text: string): Promise<TurnResult> {
+        if (this.closed) throw new Error('Claude session was discarded');
         this.abort = new AbortController();
         const options: Options = {
             cwd: this.opts.cwd,
@@ -146,6 +148,8 @@ class ClaudeSession implements AgentSession {
     async interrupt(): Promise<void> {
         this.abort?.abort();
     }
+
+    async discard() { this.closed = true; await this.interrupt(); }
 
     async setReadOnly(on: boolean): Promise<void> {
         this.opts = { ...this.opts, readOnly: on };

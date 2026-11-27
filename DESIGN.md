@@ -206,11 +206,37 @@ Unrelated programming errors still propagate.
   `/roles`, preserving unrelated configuration and accumulated kept role changes.
 - `/status`: current task, step, which agent is running, last gate result
 - `/stop [chat|plan]`: interrupt the running agent (or the chat, or the planner)
+- `/abort [task|maintenance]`: stop owned work, abandon the session and clear its queue. Tasks
+  restore the checkpoint captured before `/next`; maintenance retains completed campaign reports.
+  `/abort cancel` cancels only before rollback begins.
 - `/log [path]`: export/list the current sessions, or attach a saved file from project logs,
   command logs or attachment backups. Resolve canonical paths to reject traversal and escaping symlinks.
 - `/<name> [args]`, `/<name> stop`: project commands from `[commands]` (see README)
 - plain text: goes to the agent of the current step; a Telegram reply to an agent's message goes
   to that message's session, whatever the current step is
+
+## Abort and rollback
+
+`state.taskCheckpoint` records the starting branch/HEAD, index tree, working tree (including
+non-ignored untracked files), protected log/state directories and commits observed during task
+turns. A temporary Git index captures working files without changing the user's staging area.
+Checkpoint commits are reachable through `refs/telebaton/checkpoints/`. Commits made outside task
+turns remain distinguishable, so abort can refuse a rollback that would remove unrelated work.
+
+`state.abort` persists the stopping, resetting and discarding phases. New task/planning work and
+automatic transitions are blocked until abort finishes or is cancelled before resetting. Agent
+turns, descendant jobs and the managed `_gate` process group must settle first; unknown status
+holds the barrier. Gates run through `Jobs` so abort and shutdown reach their descendants.
+
+Before rollback, export/archive task evidence and save a recovery snapshot under
+`refs/telebaton/aborts/`. Reset HEAD, restore working files and then restore the original index;
+remove only new non-ignored untracked files. Keep logs, ignored output and side sessions. Save the
+expected HEAD so restarting a partial rollback cannot silently remove later manual commits.
+Provider/session cleanup is idempotent and resumes without another model turn. Remember discarded
+session IDs to interrupt unexpected resumes; canonical findings are cleared for a fresh task run.
+
+Maintenance abort stops and discards its current session/queue. Its source snapshot, campaign and
+successful reports remain available. No implementation rollback runs in that path.
 
 ## Maintenance discovery
 

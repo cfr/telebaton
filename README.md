@@ -143,6 +143,34 @@ an explicitly selected single task replaces the queue only after confirmation.
 If a queued task's implementation session could not be created, `/next` retries that task and
 preserves the remaining queue. It also recovers older saved startup failures with no task session.
 
+`/abort` abandons the active implementation task or maintenance run. `/abort task` and
+`/abort maintenance` select the target explicitly. It stops agent turns and their owned jobs,
+including a running implementation gate, and clears that target's remaining queue.
+
+For implementation tasks, `/next` saves a Git checkpoint before starting the agent. Aborting
+undoes the task's commits and restores the original staged, unstaged and non-ignored untracked
+files, including the original `PLAN.md` and `CHANGELOG.md`. New non-ignored task files are removed.
+Uncommitted manual edits made after task start are also discarded. Ignored build output and the
+configured log/state directories are retained; those directories must be separate from the
+project root. Independent chat and planning sessions remain available, but an active planner
+must settle before rollback.
+Rollback affects the local repository; it does not reverse pushes or deployments.
+
+Abort refuses a switched branch, unrelated commits made outside recorded task turns, or unknown
+running work. It waits until owned work settles and shows blockers in `/status`. `/abort cancel`
+cancels a pending abort before rollback starts, leaving the task stopped. Once rollback starts,
+`/abort` retries any interrupted cleanup; a restart resumes the saved abort without another model
+turn. Older/adopted tasks without a starting checkpoint need manual rollback.
+
+Task logs and findings are archived under `<logs>/aborted/<task>-<unique-id>/`, and a Git recovery
+snapshot is saved under `refs/telebaton/aborts/`. `rollback.json` in the archive records the starting
+checkpoint and recovery ref; `git show <ref>:<path>` reads a saved working file. Native harness
+history may remain, but the task's Telebaton sessions are removed and cannot be continued.
+
+For maintenance, abort removes the active session and queue without resetting project source.
+The campaign manifest, frozen baseline, completed reports and exported logs are retained. A new
+`/maintenance <chunk> [agent]` can start a fresh attempt at an unfinished chunk.
+
 `[flow] feedback_rounds` defaults to the number of feedback agents; `0` skips feedback. Each step
 includes the initial check and any repair verification turns in the same checker session. Those
 verification turns keep the same round number. Open findings go back to the implementer and are
@@ -193,6 +221,8 @@ literal `\n` sequences in quoted `-m` arguments. Earlier commits are not rewritt
 | `/summary [role] [agent]` | Ask a fresh read-only session to summarize a session log. |
 | `/status` | Show the task, running/pending work, sessions, and last gate. |
 | `/stop [chat\|plan\|maintenance]` | Interrupt the active agent, or only the explicit target. |
+| `/abort [task\|maintenance]` | Abandon the session/queue and restore an implementation task's starting state. |
+| `/abort cancel` | Cancel an abort before rollback begins; leave the task stopped. |
 | `/agents` | List configured agent aliases and models. |
 | `/usage` | Read account quotas, reset times, and available API balances. |
 | `/roles` | Show configured role defaults and current task assignments. |
@@ -628,7 +658,7 @@ npm test       # Node test runner
 
 Telebaton is a prototype. Current limits include:
 
-- The verification gate cannot be interrupted through `/stop`.
+- `/stop` does not interrupt the verification gate; `/abort task` stops it and rolls back the task.
 - Provider failures require `/continue`; they are not retried automatically. Report-format
   correction retries and pending-work status rechecks are separate mechanisms.
 - The planner's `PLAN.md`-only write rule is checked after the turn rather than enforced as a

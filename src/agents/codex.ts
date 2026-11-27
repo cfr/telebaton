@@ -1,6 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { AgentConfig } from '../config.ts';
@@ -52,6 +52,7 @@ function processBirth(pid: number): string {
 
 class CodexSession implements AgentSession {
     private closed = false;
+    private discarded = false;
     private child?: ChildProcess;
     private stopped = false;
     private saved: Saved;
@@ -84,6 +85,7 @@ class CodexSession implements AgentSession {
         this.persist();
     }
     private persist() {
+        if (this.discarded) return;
         this.saved.transcript.updated = Date.now();
         writeFileSync(`${this.file}.tmp`, JSON.stringify(this.saved), { mode: 0o600 });
         renameSync(`${this.file}.tmp`, this.file);
@@ -187,6 +189,12 @@ class CodexSession implements AgentSession {
         }
     }
     async close() { this.closed = true; await this.interrupt(); }
+    async discard() {
+        await this.close();
+        this.discarded = true;
+        rmSync(this.file, { force: true });
+        rmSync(this.file + '.tmp', { force: true });
+    }
     async transcript(): Promise<Transcript> { return this.saved.transcript; }
     async turnState(since: number): Promise<TurnState> {
         if (this.child || (this.saved.process && groupAlive(this.saved.process.pid))) return { running: true };

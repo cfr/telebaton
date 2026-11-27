@@ -5,6 +5,8 @@ import type { Role, SessionRole } from './config.ts';
 import type { PlanItem } from './plan.ts';
 import type { Notification } from './notifications.ts';
 import type { MaintenanceState } from './maintenance.ts';
+import type { TaskCheckpoint } from './abort.ts';
+import type { AgentConfig } from './config.ts';
 
 export interface SessionRef {
     agent: string;
@@ -51,6 +53,9 @@ export interface GateRecord {
 
 export interface State {
     maintenance?: MaintenanceState;
+    taskCheckpoint?: TaskCheckpoint;
+    abort?: { target: 'task' | 'maintenance'; task?: string; phase: 'stopping' | 'resetting' | 'discarding'; backupRef?: string; archiveDir?: string; head?: string; detail?: string };
+    abortedSessions?: { id: string; agent: AgentConfig; cwd: string; title: string; pendingWorkState?: PendingWorkState }[];
     task?: PlanItem;
     taskComplete?: boolean;
     taskQueue?: { ids: string[]; agent?: string; paused?: boolean; current?: string };

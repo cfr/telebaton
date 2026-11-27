@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { CodexAdapter } from './agents/codex.ts';
 import { ClaudeAdapter } from './agents/claude.ts';
@@ -31,6 +32,7 @@ import { defaultRoles, editRoleDefaults, onlyRoleChanges, swapRoleDefaults } fro
 import { AgentLimits } from './limits.ts';
 import { NotificationOutbox } from './notifications.ts';
 import { MaintenanceFlow } from './maintenance.ts';
+import { backUpTaskAbort, captureTaskCheckpoint, recordTaskCommits, restoreTaskCheckpoint, validateTaskRollback } from './abort.ts';
 
 type Busy = Role | 'gate' | `/${string}` | null;
 
@@ -62,6 +64,7 @@ const help = `/next [agent] [id] - start the next PLAN item (or a given one)
 /agent <alias> - hand off the current task's focused role; /continue to resume
 /status - current task, step, sessions, last gate
 /stop [chat|plan|maintenance] - interrupt the running agent or an explicit session
+/abort [task|maintenance] - discard the active session/queue and undo implementation task changes
 /log [path] - list session logs, or attach a saved log/report
 /diff [hash] - request the current task diff, or a single commit patch
 Plain text goes to the current session; reply to an agent message to reach that session.`;
@@ -101,6 +104,8 @@ export class Telebaton {
     private chat: Messenger;
     private notifications: NotificationOutbox;
     private maintenance: MaintenanceFlow;
+    private abortBusy = false;
+    private abortRequestBusy = false;
 
     constructor(local: LocalConfig, store: Store, chat: Messenger) {
         this.local = local;
@@ -141,6 +146,7 @@ export class Telebaton {
         chat.command('agent', (a) => this.agentCommand(a));
         chat.command('status', async () => chat.sendHtml(this.status()));
         chat.command('stop', (a) => this.stop(a));
+        chat.command('abort', (a) => this.abortCommand(a));
         chat.command('log', (a) => this.logCommand(a));
         chat.command('diff', (a) => this.diffCommand(a));
         chat.onText = (text, route) => route === 'maintenance'
@@ -376,6 +382,11 @@ export class Telebaton {
                 this.store.save();
             },
         });
+        if (this.state.abort) {
+            await s.interrupt();
+            await s.discard?.();
+            throw new Error('session startup cancelled by /abort');
+        }
         const startSha = await repo.head(this.project.root);
         prepare?.();
         this.live.set(role, s);
@@ -401,6 +412,7 @@ export class Telebaton {
     }
 
     private claim(what: Busy) {
+        if (this.state.abort && what !== '/abort') throw new Error('abort is pending; /status or /abort to finish it');
         if (this.shuttingDown) throw new Error('Telebaton is shutting down');
         if (this.recoveringWork) throw new Error('recovering session work; try again after /status');
         const waiting = this.waitingRole();
@@ -440,6 +452,7 @@ export class Telebaton {
     }
 
     private requireIdleFlow(allowCheckpoint = false) {
+        if (this.state.abort) throw new Error('abort is pending; /status or /abort to finish it');
         if (this.flowing) throw new Error('task flow is still running; wait for it to settle');
         if (!allowCheckpoint && this.state.gateContinuation) {
             throw new Error('a successful gate has pending workflow steps; /recover to resume or /gate to verify again');
@@ -522,6 +535,7 @@ export class Telebaton {
             if (go !== 'start') {
                 return;
             }
+            if (this.state.abort) throw new Error('task startup cancelled by /abort');
             this.state.taskQueue = undefined;
             await this.prepareTask(item, agentName);
         } finally {
@@ -531,10 +545,13 @@ export class Telebaton {
     }
 
     private async prepareTask(item: PlanItem, agentName: string) {
+        const checkpoint = await captureTaskCheckpoint(this.project.root, item.id, join(dirname(this.local.stateFile), 'aborts'),
+            [this.project.logDir, dirname(this.local.stateFile)]);
         await this.createSession('implement', agentName, item.id, () => {
             this.dropTaskSessions();
             this.state.task = item;
             this.state.taskComplete = false;
+            this.state.taskCheckpoint = checkpoint;
             this.state.sessions = this.keepSideSessions();
             this.state.focus = 'implement';
             this.state.lastGate = undefined;
@@ -548,7 +565,7 @@ export class Telebaton {
     }
 
     private async advanceQueue() {
-        if (this.advancingQueue || this.shuttingDown || this.recoveringWork) return;
+        if (this.advancingQueue || this.shuttingDown || this.recoveringWork || this.state.abort) return;
         this.advancingQueue = true;
         try {
             while (this.state.taskQueue && !this.state.taskQueue.paused && !this.taskInProgress()) {
@@ -645,6 +662,7 @@ export class Telebaton {
         this.dropTaskSessions();
         this.state.task = found ?? { id: fullId, number: idNumber(id), text: '(done outside Telebaton)' };
         this.state.taskComplete = false;
+        this.state.taskCheckpoint = undefined;
         this.state.sessions = this.keepSideSessions();
         this.state.lastGate = undefined;
         this.state.feedbackRound = undefined;
@@ -1298,6 +1316,7 @@ export class Telebaton {
     }
 
     private async turn(role: Role, text: string, doing: string, gateAttempt = 0, quote = true) {
+        if (this.state.abort) throw new Error('abort is pending; /abort to finish it');
         if (this.state.sessions[role]?.swapRequested) throw new Error('agent handoff is pending; wait before sending another turn');
         const handoff = this.state.sessions[role]?.handoff;
         if (handoff) text = `${handoff}\n\nNext instruction:\n${text}`;
@@ -1317,11 +1336,25 @@ export class Telebaton {
                 text = await this.feedbackTracker.prompt(role, text);
                 const head = `${this.prefix(role)} ${doing}…`;
                 await (quote ? this.notifications.sendQuoted(head, text, role) : this.notifications.send(head, role));
+                const checkpoint = this.state.taskCheckpoint;
+                if (checkpoint && checkpoint.task === this.state.task?.id) {
+                    await recordTaskCommits(checkpoint);
+                    checkpoint.turn = { session: this.session(role).id, head: await repo.head(this.project.root) };
+                    this.store.save();
+                }
                 this.markTurn(role, { since: Date.now(), doing, gateAttempt });
                 r = await this.session(role).send(text);
                 if (handoff) { this.state.sessions[role]!.handoff = undefined; this.store.save(); }
                 settled = await this.settle(role, r);
             } finally {
+                const checkpoint = this.state.taskCheckpoint;
+                if (checkpoint && checkpoint.turn?.session === this.state.sessions[role]?.id) {
+                    try {
+                        await recordTaskCommits(checkpoint);
+                        if (!this.state.sessions[role]?.workWait && !this.state.abort) checkpoint.turn = undefined;
+                        this.store.save();
+                    } catch (error) { console.error('record task commits:', describeError(error)); }
+                }
                 this.markTurn(role, undefined);
                 this.busy = null;
             }
@@ -1334,6 +1367,7 @@ export class Telebaton {
     }
 
     private runningTask(): string | undefined {
+        if (this.state.abort) return `aborting ${this.state.abort.target}`;
         if (this.busy && this.busy !== 'plan') {
             return this.busy;
         }
@@ -1351,6 +1385,7 @@ export class Telebaton {
 
     // Read-only while a task runs, so the planner never edits PLAN.md under an implementer that moves its item.
     private async planTurn(text: string, doing: string, quote: boolean) {
+        if (this.state.abort) throw new Error('abort is pending; /abort to finish it');
         if (!text.includes(planValidationGuidance)) text += `\n\n${planValidationGuidance}`;
         if (this.planBusy) {
             throw new Error('the planning session is answering; wait for it or /stop plan');
@@ -1399,6 +1434,7 @@ export class Telebaton {
     }
 
     private async afterTurn(role: Role, r: TurnResult, gateFrom: string | undefined, gateAttempt: number) {
+        if (this.state.abort) return;
         if (this.state.sessions[role]?.swapRequested) {
             await this.finishAgentSwap(role);
             return;
@@ -1542,6 +1578,7 @@ export class Telebaton {
     // `from`: the commit before the session's new commits, when it committed since it was last checked.
     private async settle(role: Role, r: TurnResult, readOnly = false, postReply = true): Promise<{ waiting: boolean; from?: string }> {
         await this.exportLog(role).catch((e: Error) => this.notifications.send(`log export failed: ${e.message}`));
+        if (this.state.abort) return { waiting: false };
         const p = this.prefix(role);
         if (r.text && postReply) {
             await this.notifications.sendMarkdown(p, r.text, role);
@@ -1571,6 +1608,12 @@ export class Telebaton {
             delete this.state.sessions[role]!.workWait;
             this.store.save();
         }
+        const checkpoint = this.state.taskCheckpoint;
+        if (checkpoint && checkpoint.turn?.session === this.state.sessions[role]?.id) {
+            await recordTaskCommits(checkpoint);
+            checkpoint.turn = undefined;
+            this.store.save();
+        }
         if (this.state.sessions[role]?.swapRequested) return { waiting: false };
         if (r.outcome !== 'succeeded') {
             return { waiting: false };
@@ -1594,6 +1637,18 @@ export class Telebaton {
     }
 
     private async unsolicited(sessionId: string, ev: UnsolicitedEvent) {
+        const aborted = this.state.abortedSessions?.find((s) => s.id === sessionId);
+        if (aborted) {
+            if (ev.phase === 'started') {
+                const session = this.adapters[aborted.agent.harness].resume(aborted.agent, sessionId, {
+                    title: aborted.title, cwd: aborted.cwd, readOnly: true, asker: { permission: async () => 'reject', question: async () => '' },
+                    pendingWorkState: aborted.pendingWorkState,
+                });
+                await session.interrupt();
+            }
+            return;
+        }
+        if (this.state.abort) { this.watchWork(); return; }
         if (this.maintenance.owns(sessionId)) {
             await this.maintenance.unsolicited(sessionId, ev);
             if (this.maintenance.pending) this.watchWork();
@@ -1661,6 +1716,7 @@ export class Telebaton {
 
     private async drainWork() {
         if (this.drainingWork || this.recoveringWork || this.busy || this.planBusy || this.stoppingWork) return;
+        if (this.state.abort) { await this.finishAbort(); return; }
         if (this.maintenance.pending) {
             await this.runMaintenance(() => this.maintenance.poll());
             return;
@@ -1817,10 +1873,15 @@ export class Telebaton {
         let g: repo.GateResult;
         try {
             await this.notifications.send(`gate: running ${this.project.gate.map((s) => s.name).join(' + ')}…`);
-            g = await repo.runGate(root, this.project.gate);
+            g = await repo.runGate(root, this.project.gate, async (cmd) => {
+                if (this.state.abort) return { code: 130, output: 'Task aborted before gate step' };
+                const result = await this.jobs.run('_gate', cmd, root);
+                return { code: result.code, output: readLog(result.log) };
+            });
         } finally {
             this.busy = null;
         }
+        if (this.state.abort) return;
         const sha = await repo.head(root);
         const gateFile = join(this.project.logDir, `${this.state.task?.id ?? 'task'}-gate.log`);
         mkdirSync(this.project.logDir, { recursive: true });
@@ -2046,6 +2107,172 @@ export class Telebaton {
         const role = busy as Role;
         await this.interruptSession(role);
         await this.notifications.send(`interrupt sent to ${this.prefix(role)}`);
+    }
+
+    private taskAbortSessions() {
+        const refs = (['implement', 'feedback', 'review'] as const).flatMap((role) => {
+            const ref = this.state.sessions[role];
+            return ref ? [{ role, ref }] : [];
+        });
+        for (const archived of this.state.archivedSessions ?? []) {
+            if (archived.task === this.state.task?.id && archived.role !== 'plan') refs.push({ role: archived.role, ref: archived.ref });
+        }
+        return [...new Map(refs.map((r) => [r.ref.id, r])).values()];
+    }
+
+    private abortSession(role: SessionRole, ref: SessionRef): AgentSession {
+        if (this.state.sessions[role]?.id === ref.id) return this.session(role);
+        const agent = this.agent(ref.agent);
+        return this.adapters[agent.harness].resume(agent, ref.id, { title: ref.title, cwd: this.project.root,
+            readOnly: true, asker: { permission: async () => 'reject', question: async () => '' }, pendingWorkState: ref.pendingWorkState });
+    }
+
+    private async abortCommand(args: string) {
+        if (this.abortRequestBusy) throw new Error('abort is already processing; /status');
+        this.abortRequestBusy = true;
+        try { await this.requestAbort(args); }
+        finally { this.abortRequestBusy = false; }
+    }
+
+    private async requestAbort(args: string) {
+        const target = args.trim();
+        if (!['', 'task', 'maintenance', 'cancel'].includes(target)) throw new Error('usage: /abort [task|maintenance|cancel]');
+        if (this.abortBusy) throw new Error('abort is already processing; /status');
+        if (target === 'cancel') {
+            if (this.state.abort?.phase !== 'stopping') throw new Error('only an abort that has not started rollback can be cancelled');
+            this.state.abort = undefined;
+            this.store.save();
+            await this.notifications.send('abort cancelled; sessions and queues remain stopped. /continue to resume');
+            return;
+        }
+        this.reload();
+        const wanted = target || this.state.abort?.target ||
+            (this.busy === '/maintenance' || (!this.taskInProgress() && (this.maintenance.hasQueue || this.state.maintenance?.active)) ? 'maintenance' : 'task');
+        if (this.state.abort && this.state.abort.target !== wanted) throw new Error(`an abort of ${this.state.abort.target} is already pending`);
+        if (!this.state.abort) {
+            if (this.recoveringWork || this.shuttingDown || this.planBusy || this.state.sessions.plan?.workWait) throw new Error('wait for startup/planning to settle before /abort');
+            if (this.busy && !['implement', 'feedback', 'review', 'gate', '/maintenance'].includes(this.busy)) throw new Error(`${this.busy} must finish before /abort`);
+            if (wanted === 'maintenance' && ((this.busy && this.busy !== '/maintenance') || (this.flowing && this.busy !== '/maintenance'))) {
+                throw new Error('implementation work must settle before aborting maintenance');
+            }
+            if (wanted === 'task') {
+                if (!this.taskInProgress()) { await this.notifications.send('no unfinished implementation task to abort'); return; }
+                const checkpoint = this.state.taskCheckpoint;
+                if (!checkpoint || checkpoint.task !== this.state.task!.id) throw new Error('this task has no starting checkpoint (older or adopted task); /stop it and reconcile the changes manually');
+                if (checkpoint.root !== resolve(this.project.root)) throw new Error('the checkpoint belongs to another repository');
+                if (this.maintenance.pending) throw new Error('abort maintenance first before resetting the implementation tree');
+                if (this.state.taskQueue) this.state.taskQueue.paused = true;
+            } else if (!this.state.maintenance?.active && !this.maintenance.hasQueue) {
+                await this.notifications.send('no maintenance session or queue to abort'); return;
+            }
+            this.state.abort = { target: wanted as 'task' | 'maintenance', task: this.state.task?.id, phase: 'stopping' };
+            this.store.save();
+            await this.notifications.send(`aborting ${wanted === 'task' ? this.state.task!.id : 'maintenance'}; stopping owned work…`);
+        }
+        if (this.state.abort.target === 'task' && (this.state.taskCheckpoint?.task !== this.state.abort.task ||
+            this.state.taskCheckpoint?.root !== resolve(this.project.root))) throw new Error('the abort checkpoint does not match the current task/project');
+        if (this.state.abort.phase === 'stopping') {
+            if (wanted === 'maintenance') await this.maintenance.stopForAbort();
+            else {
+                await this.jobs.stop('_gate');
+                const results = await Promise.allSettled(this.taskAbortSessions().map(({ role, ref }) => this.abortSession(role, ref).interrupt()));
+                const errors = results.filter((r) => r.status === 'rejected');
+                if (errors.length) {
+                    this.state.abort.detail = errors.map((r) => describeError(r.reason)).join('; ');
+                    this.store.save(); this.watchWork();
+                    throw new Error(`could not stop all task sessions: ${this.state.abort.detail}; /abort to retry`);
+                }
+            }
+        }
+        await this.finishAbort(true);
+        if (this.state.abort) this.watchWork();
+    }
+
+    private async finishAbort(fromCommand = false) {
+        const abort = this.state.abort;
+        if (!abort || this.abortBusy || (this.abortRequestBusy && !fromCommand) || this.busy || this.flowing || this.planBusy || this.stoppingWork || this.recoveringWork) return;
+        this.abortBusy = true;
+        this.busy = '/abort';
+        try {
+            if (abort.target === 'task' && (this.state.taskCheckpoint?.task !== abort.task ||
+                this.state.taskCheckpoint?.root !== resolve(this.project.root))) throw new Error('the abort checkpoint does not match the current task/project');
+            if (abort.phase === 'stopping') {
+                if (abort.target === 'maintenance') {
+                    if (!(await this.maintenance.abortReady())) { abort.detail = 'waiting for maintenance work to stop'; this.store.save(); return; }
+                    this.rememberAborted(this.maintenance.abortSessions);
+                    abort.phase = 'discarding';
+                } else {
+                    const refs = this.taskAbortSessions();
+                    for (const { role, ref } of refs) {
+                        const session = this.abortSession(role, ref);
+                        if ((await session.turnState(ref.turn?.since ?? ref.workWait?.since ?? 0)).running ||
+                            (await session.pendingWork()).some((w) => w.kind !== 'subagent' || !w.terminal)) {
+                            abort.detail = `waiting for ${role} and its owned work to stop`; this.store.save(); return;
+                        }
+                    }
+                    const checkpoint = this.state.taskCheckpoint!;
+                    await recordTaskCommits(checkpoint);
+                    checkpoint.turn = undefined;
+                    await validateTaskRollback(checkpoint);
+                    for (const role of ['implement', 'feedback', 'review'] as const) await this.exportLog(role);
+                    abort.archiveDir ??= join(this.project.logDir, 'aborted', `${abort.task}-${randomUUID()}`);
+                    mkdirSync(abort.archiveDir, { recursive: true });
+                    const files = refs.map(({ ref }) => ref.logFile).filter((file): file is string => !!file);
+                    files.push(join(this.project.logDir, `${abort.task}-gate.log`), join(this.project.logDir, `${abort.task}-findings.md`),
+                        join(dirname(this.local.stateFile), 'findings', `${abort.task}.json`));
+                    for (const file of files) {
+                        if (existsSync(file)) copyFileSync(file, join(abort.archiveDir, basename(file)));
+                        const usage = file.replace(/\.md$/, '.usage.json');
+                        if (file.endsWith('.md') && existsSync(usage)) copyFileSync(usage, join(abort.archiveDir, basename(usage)));
+                    }
+                    abort.head = await repo.head(this.project.root);
+                    abort.backupRef = await backUpTaskAbort(checkpoint, join(dirname(this.local.stateFile), 'aborts'));
+                    if ((await repo.head(this.project.root)) !== abort.head) throw new Error('HEAD changed while preparing the abort');
+                    writeFileSync(join(abort.archiveDir, 'rollback.json'), JSON.stringify({ checkpoint, backupRef: abort.backupRef }, null, 2) + '\n');
+                    abort.phase = 'resetting';
+                }
+                abort.detail = undefined;
+                this.store.save();
+            }
+            if (abort.phase === 'resetting') {
+                await restoreTaskCheckpoint(this.state.taskCheckpoint!, abort.head);
+                this.rememberAborted(this.taskAbortSessions().map(({ ref }) => ({ id: ref.id, agent: this.agent(ref.agent), cwd: this.project.root,
+                    title: ref.title, pendingWorkState: ref.pendingWorkState })));
+                abort.phase = 'discarding';
+                this.store.save();
+            }
+            if (abort.target === 'maintenance') await this.maintenance.discardAborted();
+            else {
+                for (const { role, ref } of this.taskAbortSessions()) await this.abortSession(role, ref).discard?.();
+                rmSync(join(dirname(this.local.stateFile), 'findings', `${abort.task}.json`), { force: true });
+                this.dropTaskSessions();
+                this.state.sessions = this.keepSideSessions();
+                this.state.focus = this.state.sessions.plan ? 'plan' : undefined;
+                for (const key of ['task', 'taskComplete', 'taskQueue', 'taskCheckpoint', 'lastGate', 'gateContinuation', 'feedbackRound',
+                    'feedbackFixing', 'feedbackReportRetried', 'feedbackFindingIds', 'feedbackFixBase', 'feedbackDispositionRetried',
+                    'feedbackDispositionPending', 'workConflict'] as const) delete this.state[key];
+                this.state.archivedSessions = this.state.archivedSessions?.filter((s) => s.task !== abort.task);
+                this.state.feedbackSkips = this.state.feedbackSkips?.filter((s) => s.task !== abort.task);
+            }
+            this.state.abort = undefined;
+            this.store.save();
+            await this.notifications.sendMarkdown('[abort]', abort.target === 'maintenance'
+                ? 'Maintenance session and queue aborted. Completed campaign reports are retained.'
+                : `Aborted ${abort.task}; restored its starting repository state and cleared the task queue.\nLogs: \`${abort.archiveDir}\`\nRecovery snapshot: \`${abort.backupRef}\``);
+        } catch (error) {
+            const detail = describeError(error);
+            const changed = abort.detail !== detail;
+            abort.detail = detail;
+            this.store.save();
+            if (changed) await this.notifications.send(`abort paused: ${detail}; /abort to retry${abort.phase === 'stopping' ? ' or /abort cancel' : ''}`);
+        } finally {
+            this.busy = null;
+            this.abortBusy = false;
+        }
+    }
+
+    private rememberAborted(sessions: NonNullable<State['abortedSessions']>) {
+        this.state.abortedSessions = [...new Map([...(this.state.abortedSessions ?? []), ...sessions].map((s) => [s.id, s])).values()];
     }
 
     private async interruptSession(role: SessionRole) {
@@ -2277,6 +2504,7 @@ export class Telebaton {
             `running: ${escapeHtml(this.runningTask() ?? 'nothing')}${this.planBusy ? ' (plan answering)' : ''}${this.chat.pendingQuestions() ? ` (${this.chat.pendingQuestions()} question(s) waiting)` : ''}`,
             `focus: ${s.focus ?? '-'}${this.chatBusy ? ' (chat answering)' : ''}`,
             ...(s.maintenance ? [escapeHtml(this.maintenance.status())] : []),
+            ...(s.abort ? [`abort: ${s.abort.target}, ${s.abort.phase}${s.abort.detail ? ` — ${escapeHtml(s.abort.detail)}` : ''}; /abort to retry`] : []),
             ...(s.taskQueue ? [`task queue${s.taskQueue.paused ? ' (paused)' : ''}: ${escapeHtml(s.taskQueue.ids.join(', ') || 'last task in progress')}`] : []),
             ...(s.workConflict ? [`verification required: ${escapeHtml(s.workConflict)}`] : []),
             ...(s.gateContinuation ? ['workflow recovery pending; /recover to resume from the saved gate'] : []),
@@ -2328,11 +2556,15 @@ export class Telebaton {
             if (s.gateContinuation) {
                 await this.notifications.send('saved successful gate has pending workflow steps; /recover to resume without rerunning the gate');
             }
-            await this.recoverPendingWork();
-            await this.recoverTurns();
-            await this.maintenance.recover();
+            if (this.state.abort) {
+                await this.notifications.send(`resuming saved ${this.state.abort.target} abort (${this.state.abort.phase}); /status for progress`);
+            } else {
+                await this.recoverPendingWork();
+                await this.recoverTurns();
+                await this.maintenance.recover();
+            }
         } finally { this.recoveringWork = false; }
-        if (this.waitingRole() || this.maintenance.pending) this.watchWork();
+        if (this.waitingRole() || this.maintenance.pending || this.state.abort) this.watchWork();
         await this.drainWork();
     }
 }

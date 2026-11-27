@@ -42,11 +42,11 @@ export interface GateResult {
     seconds: number;
 }
 
-export async function runGate(root: string, steps: GateStep[]): Promise<GateResult> {
+export async function runGate(root: string, steps: GateStep[], runStep = (cmd: string) => shell(cmd, root)): Promise<GateResult> {
     const started = Date.now();
     let log = '';
     for (const step of steps) {
-        const r = await shell(step.cmd, root);
+        const r = await runStep(step.cmd);
         log += `$ ${step.cmd}\n${r.output}\n[exit ${r.code}]\n\n`;
         if (r.code !== 0) {
             return { ok: false, failedStep: step.name, log, seconds: (Date.now() - started) / 1000 };

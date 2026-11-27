@@ -71,6 +71,8 @@ export interface AgentSession {
     pendingWork(): Promise<PendingWork[]>;
     // Applies from the next turn on.
     setReadOnly(on: boolean): Promise<void>;
+    // Called only after the turn and its owned work have stopped. Exported logs are retained.
+    discard?(): Promise<void>;
 }
 
 export type UnsolicitedEvent =

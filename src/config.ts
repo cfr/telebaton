@@ -33,7 +33,7 @@ export interface ProjectCommand {
 
 export const builtinCommands = [
     'help', 'start', 'next', 'review', 'fix', 'feedback', 'continue', 'gate', 'todo', 'queue', 'plan', 'chat', 'summary', 'agents',
-    'status', 'stop', 'skip', 'log', 'roles', 'agent', 'swap', 'usage', 'diff', 'recover', 'maintenance',
+    'status', 'stop', 'abort', 'skip', 'log', 'roles', 'agent', 'swap', 'usage', 'diff', 'recover', 'maintenance',
 ];
 
 export interface GateStep {

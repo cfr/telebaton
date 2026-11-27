@@ -10,9 +10,10 @@ export function run(
     args: string[],
     cwd: string,
     signal?: AbortSignal,
+    env?: NodeJS.ProcessEnv,
 ): Promise<RunResult> {
     return new Promise((resolve, reject) => {
-        const child = spawn(cmd, args, { cwd, signal, stdio: ['ignore', 'pipe', 'pipe'] });
+        const child = spawn(cmd, args, { cwd, signal, env, stdio: ['ignore', 'pipe', 'pipe'] });
         const chunks: Buffer[] = [];
         child.stdout.on('data', (b: Buffer) => chunks.push(b));
         child.stderr.on('data', (b: Buffer) => chunks.push(b));
